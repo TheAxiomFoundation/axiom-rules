@@ -30,16 +30,16 @@ tar -xJf "$asset"
 
 ## Trusted rule content
 
-The downloaded binary alone runs a compiled artifact or a self-contained JSON
-`ExecutionRequest`. Compiling canonical `us:` imports from source additionally
-requires a rulespec checkout (or a downloaded program-artifacts release),
-passed with the **required, repeatable `--rulespec-root`** flag — one absolute
-path per canonical country repo:
+The downloaded binary alone runs a compiled artifact (`run-compiled
+--artifact compiled.json` with a JSON request on stdin) or a self-contained
+JSON `ExecutionRequest`. Compiling from RuleSpec source additionally requires
+the rulespec checkouts to resolve imports from — set
+`AXIOM_RULESPEC_REPO_ROOTS` to the absolute checkout path(s):
 
 ```sh
-axiom-rules-engine compile-composed \
-  --program /abs/path/to/program.yaml \
-  --rulespec-root /abs/path/to/rulespec-us \
+AXIOM_RULESPEC_REPO_ROOTS=/abs/path/to/rulespec-us \
+axiom-rules-engine compile \
+  --program /abs/path/to/rules.yaml \
   --output compiled.json
 ```
 
