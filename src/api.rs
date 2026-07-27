@@ -76,6 +76,12 @@ pub struct QueryResult {
     pub outputs: BTreeMap<String, OutputValue>,
     #[serde(default)]
     pub trace: BTreeMap<String, DerivedTraceNode>,
+    /// Per-instance trace for entity-scoped rules (Person rules inside
+    /// a Household query): public rule key → entity_id → node. Values
+    /// come from the same evaluation cache the aggregations warmed —
+    /// this surfaces the per-member work that was always happening.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub instance_trace: BTreeMap<String, BTreeMap<String, DerivedTraceNode>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -260,39 +266,70 @@ fn execute_explain(
             })?;
             match semantics {
                 DerivedSemantics::Scalar(_) => {
-                    let value = engine.evaluate_scalar(&output_name, &query.entity_id, &period)?;
-                    outputs.insert(
-                        output_key,
-                        OutputValue::Scalar {
-                            name: derived.name.clone(),
-                            id: derived.id.clone(),
-                            dtype: DTypeSpec::from_model(&derived.dtype),
-                            unit: derived.unit.clone(),
-                            value: ScalarValueSpec::from_model(value),
-                        },
-                    );
+                    match engine.evaluate_scalar(&output_name, &query.entity_id, &period) {
+                        Ok(value) => {
+                            outputs.insert(
+                                output_key,
+                                OutputValue::Scalar {
+                                    name: derived.name.clone(),
+                                    id: derived.id.clone(),
+                                    dtype: DTypeSpec::from_model(&derived.dtype),
+                                    unit: derived.unit.clone(),
+                                    value: ScalarValueSpec::from_model(value),
+                                },
+                            );
+                        }
+                        Err(EvalError::MissingInput { .. }) => {
+                            // Entity-scoped rule (a Person rule inside a
+                            // Household query): evaluate it at every
+                            // instance instead of failing the run — the
+                            // per-instance values land in instance_trace.
+                            for instance in dataset_entity_ids(dataset) {
+                                let _ = engine.evaluate_scalar(
+                                    &output_name,
+                                    &instance,
+                                    &period,
+                                );
+                            }
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 DerivedSemantics::Judgment(_) => {
-                    let outcome =
-                        engine.evaluate_judgment(&output_name, &query.entity_id, &period)?;
-                    outputs.insert(
-                        output_key,
-                        OutputValue::Judgment {
-                            name: derived.name.clone(),
-                            id: derived.id.clone(),
-                            unit: derived.unit.clone(),
-                            outcome: match outcome {
-                                JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
-                                JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
-                                JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
-                            },
-                        },
-                    );
+                    match engine.evaluate_judgment(&output_name, &query.entity_id, &period) {
+                        Ok(outcome) => {
+                            outputs.insert(
+                                output_key,
+                                OutputValue::Judgment {
+                                    name: derived.name.clone(),
+                                    id: derived.id.clone(),
+                                    unit: derived.unit.clone(),
+                                    outcome: match outcome {
+                                        JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
+                                        JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
+                                        JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
+                                    },
+                                },
+                            );
+                        }
+                        Err(EvalError::MissingInput { .. }) => {
+                            for instance in dataset_entity_ids(dataset) {
+                                let _ = engine.evaluate_judgment(
+                                    &output_name,
+                                    &instance,
+                                    &period,
+                                );
+                            }
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
         }
 
         let trace = collect_trace(program, &engine, &query.entity_id, &period);
+        let instance_trace =
+            collect_instance_trace(program, &engine, &query.entity_id, &period, dataset);
 
         results.push(QueryResult {
             entity_id: query.entity_id,
@@ -300,10 +337,59 @@ fn execute_explain(
             assessment_date: query.assessment_date,
             outputs,
             trace,
+            instance_trace,
         });
     }
 
     Ok(ExecutionResponse { metadata, results })
+}
+
+fn cached_trace_node(
+    program: &crate::model::Program,
+    engine: &Engine,
+    derived: &crate::model::Derived,
+    entity_id: &str,
+    period: &crate::model::Period,
+) -> Option<DerivedTraceNode> {
+    let semantics = derived.semantics_at(period)?;
+    match semantics {
+        DerivedSemantics::Scalar(expr) => {
+            let value = engine.cached_scalar(&derived.name, entity_id, period)?;
+            let pre_rounding_value = engine
+                .cached_pre_rounding(&derived.name, entity_id, period)
+                .map(ScalarValueSpec::from_model);
+            Some(DerivedTraceNode::Scalar {
+                name: derived.name.clone(),
+                id: derived.id.clone(),
+                dtype: DTypeSpec::from_model(&derived.dtype),
+                unit: derived.unit.clone(),
+                value: ScalarValueSpec::from_model(value),
+                rounding: derived
+                    .rounding
+                    .map(|rounding| RoundingModeSpec::from_model(rounding.mode)),
+                pre_rounding_value,
+                source: derived.source.clone(),
+                source_url: derived.source_url.clone(),
+                dependencies: public_dependencies(program, scalar_dependencies(expr)),
+            })
+        }
+        DerivedSemantics::Judgment(expr) => {
+            let outcome = engine.cached_judgment(&derived.name, entity_id, period)?;
+            Some(DerivedTraceNode::Judgment {
+                name: derived.name.clone(),
+                id: derived.id.clone(),
+                unit: derived.unit.clone(),
+                outcome: match outcome {
+                    JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
+                    JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
+                    JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
+                },
+                source: derived.source.clone(),
+                source_url: derived.source_url.clone(),
+                dependencies: public_dependencies(program, judgment_dependencies(expr)),
+            })
+        }
+    }
 }
 
 fn collect_trace(
@@ -314,57 +400,54 @@ fn collect_trace(
 ) -> BTreeMap<String, DerivedTraceNode> {
     let mut trace = BTreeMap::new();
     for derived in program.derived.values() {
-        let Some(semantics) = derived.semantics_at(period) else {
-            continue;
-        };
-        match semantics {
-            DerivedSemantics::Scalar(expr) => {
-                if let Some(value) = engine.cached_scalar(&derived.name, entity_id, period) {
-                    let pre_rounding_value = engine
-                        .cached_pre_rounding(&derived.name, entity_id, period)
-                        .map(ScalarValueSpec::from_model);
-                    trace.insert(
-                        program.public_derived_key(&derived.name),
-                        DerivedTraceNode::Scalar {
-                            name: derived.name.clone(),
-                            id: derived.id.clone(),
-                            dtype: DTypeSpec::from_model(&derived.dtype),
-                            unit: derived.unit.clone(),
-                            value: ScalarValueSpec::from_model(value),
-                            rounding: derived
-                                .rounding
-                                .map(|rounding| RoundingModeSpec::from_model(rounding.mode)),
-                            pre_rounding_value,
-                            source: derived.source.clone(),
-                            source_url: derived.source_url.clone(),
-                            dependencies: public_dependencies(program, scalar_dependencies(expr)),
-                        },
-                    );
-                }
-            }
-            DerivedSemantics::Judgment(expr) => {
-                if let Some(outcome) = engine.cached_judgment(&derived.name, entity_id, period) {
-                    trace.insert(
-                        program.public_derived_key(&derived.name),
-                        DerivedTraceNode::Judgment {
-                            name: derived.name.clone(),
-                            id: derived.id.clone(),
-                            unit: derived.unit.clone(),
-                            outcome: match outcome {
-                                JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
-                                JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
-                                JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
-                            },
-                            source: derived.source.clone(),
-                            source_url: derived.source_url.clone(),
-                            dependencies: public_dependencies(program, judgment_dependencies(expr)),
-                        },
-                    );
-                }
-            }
+        if let Some(node) = cached_trace_node(program, engine, derived, entity_id, period) {
+            trace.insert(program.public_derived_key(&derived.name), node);
         }
     }
     trace
+}
+
+/// Every entity instance the dataset mentions (inputs and relation
+/// tuples), the query root included.
+fn dataset_entity_ids(dataset: &crate::model::DataSet) -> Vec<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for record in &dataset.inputs {
+        ids.insert(record.entity_id.clone());
+    }
+    for relation in &dataset.relations {
+        for id in &relation.tuple {
+            ids.insert(id.clone());
+        }
+    }
+    ids.into_iter().collect()
+}
+
+/// The per-instance view: for every OTHER entity instance in the
+/// dataset, any rule values the evaluation cache holds. Aggregations
+/// (count_related / sum_related) already evaluate member rules per
+/// instance — this collects that work instead of discarding it.
+fn collect_instance_trace(
+    program: &crate::model::Program,
+    engine: &Engine,
+    query_entity_id: &str,
+    period: &crate::model::Period,
+    dataset: &crate::model::DataSet,
+) -> BTreeMap<String, BTreeMap<String, DerivedTraceNode>> {
+    let mut instance_trace: BTreeMap<String, BTreeMap<String, DerivedTraceNode>> = BTreeMap::new();
+    for instance in dataset_entity_ids(dataset) {
+        if instance == query_entity_id {
+            continue;
+        }
+        for derived in program.derived.values() {
+            if let Some(node) = cached_trace_node(program, engine, derived, &instance, period) {
+                instance_trace
+                    .entry(program.public_derived_key(&derived.name))
+                    .or_default()
+                    .insert(instance.clone(), node);
+            }
+        }
+    }
+    instance_trace
 }
 
 fn public_dependencies(program: &crate::model::Program, dependencies: Vec<String>) -> Vec<String> {

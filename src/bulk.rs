@@ -193,6 +193,7 @@ pub fn try_execute(
             assessment_date: query.assessment_date,
             outputs,
             trace: BTreeMap::new(),
+            instance_trace: std::collections::BTreeMap::new(),
         });
     }
 
