@@ -50,6 +50,17 @@ axiom-rules-engine run-compiled --artifact ctr.json < household.json
 Do not pass `--rulespec-root` or use `compile-composed` with the v0.1.1 binary.
 Those interfaces belong to the CLI built from current `main`.
 
+> **Compile only from a canonical country monorepo checkout.** Because v0.1.1 resolves
+> canonical imports by searching the filesystem rather than from explicitly declared roots, it
+> can select an authority from a *neighbouring* checkout — silently compiling a different
+> jurisdiction's text than the one your `--program` path points into
+> ([issue #99](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/99)). Layouts
+> known to resolve correctly are an exact `rulespec-<country>` monorepo and a full
+> branch-suffixed copy of one. Layouts known to mis-resolve include standalone jurisdiction
+> checkouts, sparse worktrees, nested `_axiom` directories, and reliance on cwd or environment
+> discovery. Current `main` removes this search entirely in favour of the required
+> `--rulespec-root`, which is why that flag exists.
+
 ## Use the CLI built from current main
 
 Current `main` has a different CLI contract. Its `compile` and
