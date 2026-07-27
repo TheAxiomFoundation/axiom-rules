@@ -230,12 +230,13 @@ period. The compiled node keeps its guidance ID, guidance corpus citation, and
 provision-backed annotation.
 
 Certification must also inspect existing `type: sets` endpoints before
-`apply_source_relation_sets` mutates the program. A `sets.value` whose actual
-origin is `guidance/` is rejected on this surface. Otherwise guidance semantics
-could be copied under a statute-owned target ID and citation, after which the
-dependency graph would contain no guidance-origin node for the omission gate
-to find. A future semantic-origin/taint model could preserve and validate that
-case, but the first contract does not have one.
+`apply_source_relation_sets` mutates the program. A relation for which either
+resolved executable endpoint has `guidance/` origin is rejected on this
+surface. A guidance value copied under a statute ID would disappear from the
+dependency boundary; the reverse direction would copy non-guidance semantics
+under a guidance ID and let a matching supply edge certify it falsely. A future
+semantic-origin/taint model could preserve and validate those cases, but the
+first contract does not have one.
 
 Moving the annual relation physically into the guidance module and reversing
 the import direction is a possible later architecture, but the concrete module
@@ -278,10 +279,12 @@ permitted only when all imported guidance declarations have globally unique
 local names and every effective formula version references the corresponding
 period-qualified name (for example, `eitc_earned_income_amounts_2026`).
 Canonical IDs alone are not enough because current formula lowering merges
-local declaration names. Same-named annual suppliers fail the existing
-uniqueness gate. Until guidance names are migrated or namespaced/late-bound
-imports exist, certification is one supplier period per compiled root and
-must not claim that unresolved historical edges were retained.
+local declaration names. Certification therefore adds a pre-lowering global
+uniqueness gate across parameter and derived declarations, including
+cross-kind pairs; it does not rely on runtime maps that can overwrite duplicate
+parameters. Until guidance names are migrated or namespaced/late-bound imports
+exist, certification is one supplier period per compiled root and must not
+claim that unresolved historical edges were retained.
 
 For every referenced `delegated_by`, the union of bindings valid for the
 applicability period must equal the delegation's declared value IDs. Extra
@@ -314,33 +317,35 @@ snapshot against which it ran.
 
 Certification compilation of `supplies` proceeds fail-closed:
 
-1. Resolve `delegated_by` to exactly one provision-backed, atomic
+1. Before formula lowering, require global executable declaration-name
+   uniqueness across parameters and derived rules, including cross-kind pairs.
+2. Resolve `delegated_by` to exactly one provision-backed, atomic
    `type: delegates` relation in the same origin module as the supply relation.
    Require non-empty, unique, canonical value contracts and strict shapes.
-2. Resolve `supplied_by` as an exact fragmentless atomic module target under
+3. Resolve `supplied_by` as an exact fragmentless atomic module target under
    `guidance/`. Resolve its singular citation through the pinned corpus index
    and require the corpus document class to be guidance.
-3. Resolve every binding. Require each delegated side in the referenced
+4. Resolve every binding. Require each delegated side in the referenced
    vocabulary and each supplied side to be an executable rule whose actual
    origin is exactly `supplied_by`.
-4. Compare declaration fields to the exact source RuleDefinition before
+5. Compare declaration fields to the exact source RuleDefinition before
    lowering, then compare `executable_kind` to the exact origin/ID/kind node
    after lowering. Never accept the existing `sets` behavior that silently
    continues when both endpoints are unresolved.
-5. Select relations by interval: retain and ignore disjoint historical edges,
+6. Select relations by interval: retain and ignore disjoint historical edges,
    reject partial overlaps, and require exact equality for every selected
    relation. Require complete effective-version coverage by the supplied rules.
-6. Reject empty or duplicate bindings, duplicate value contracts, more than one
+7. Reject empty or duplicate bindings, duplicate value contracts, more than one
    supplier for the same delegated value in a period, and overlapping or
    conflicting supplies.
-7. Check closure across the complete value vocabulary, including no-supplier
+8. Check closure across the complete value vocabulary, including no-supplier
    and partial-supplier cases.
-8. Resolve all `sets` endpoints before semantics copying and reject a
-   guidance-origin value on the certification surface.
-9. Traverse the period-applicable dependency graph and check every
+9. Resolve all `sets` endpoints before semantics copying and reject the
+   relation when either endpoint has guidance origin.
+10. Traverse the period-applicable dependency graph and check every
    non-guidance-to-guidance entry edge so omission of the relation itself
    cannot bypass certification.
-10. Retain the validated graph and closure result without rewriting executable
+11. Retain the validated graph and closure result without rewriting executable
    identities or provenance.
 
 A guidance module compiled alone, with no legal relation in that module, still
@@ -393,12 +398,13 @@ Every new gate needs a fixture that constructs the rejected input. At minimum:
 - duplicate, overlapping, or conflicting suppliers;
 - a partially overlapping annual edge, while disjoint historical edges remain
   valid and out of scope;
-- same-named annual guidance declarations in one merged program;
+- same-named annual parameter declarations and a same-name
+  parameter/derived pair in one merged program;
 - no supplier and partial closure; and
 - a period-applicable cross-origin guidance entry introduced by a plain import
   with no legal edge;
-- a guidance-owned `sets.value` copied into a statute-owned target before
-  dependency traversal;
+- both laundering directions for `sets`: guidance value into non-guidance
+  target, and non-guidance value into guidance target;
 - guidance used for an unsupported non-supply role on the v1 certification
   surface.
 
