@@ -46,18 +46,31 @@ rules: []
 ```
 
 Import targets follow the same path identity scheme as rule IDs, without the
-optional `#rule_name` suffix. Supply the exact country checkout explicitly:
+optional `#rule_name` suffix. Release v0.1.1 and current `main` use different
+CLI contracts to resolve those targets.
+
+### Released v0.1.1 binary
+
+The v0.1.1 `compile` command accepts `--program` and `--output` only and resolves
+canonical cross-repo imports without a root flag. See the
+[release instructions](install.md) for a complete example.
+
+### CLI built from current main
+
+With a binary built from current `main`, supply the exact country checkout
+explicitly with the required, repeatable `--rulespec-root` option:
 
 ```bash
-axiom-rules-engine compile \
+cargo run -- compile \
   --program /srv/rulespec-us/us-tn/policies/example.yaml \
   --rulespec-root /srv/rulespec-us \
   --output /tmp/example.compiled.json
 ```
 
-The runtime resolves `us:` to `/srv/rulespec-us/us/` and `us-tn:` to
-`/srv/rulespec-us/us-tn/`. It never discovers or prefers standalone,
-suffixed-worktree, sibling, ancestor, cwd, or environment-provided roots.
+For this current-`main` command, the engine resolves `us:` to
+`/srv/rulespec-us/us/` and `us-tn:` to `/srv/rulespec-us/us-tn/`. It never
+discovers or prefers standalone, suffixed-worktree, sibling, ancestor, cwd, or
+environment-provided roots.
 
 Rule files are named by the legal or policy unit they encode. Companion tests use
 the same stem and are never importable module targets:
