@@ -1251,3 +1251,135 @@ fn judgment_output(output: &OutputValue) -> JudgmentOutcomeSpec {
 fn decimal(value: &str) -> Decimal {
     Decimal::from_str(value).expect("valid decimal literal")
 }
+
+/// Per-instance tracing: the aggregation already evaluates member
+/// rules per person — the trace must surface those values instead of
+/// discarding them, and requesting a member rule as an output must
+/// not fail the household query.
+#[test]
+fn instance_trace_surfaces_member_rule_values() {
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            derivation: None,
+        }],
+        derived: vec![
+            DerivedSpec {
+                id: None,
+                name: "person_income".to_string(),
+                entity: "Person".to_string(),
+                dtype: DTypeSpec::Decimal,
+                unit: None,
+                source: None,
+                period: None,
+                source_url: None,
+                semantics: DerivedSemanticsSpec::Scalar {
+                    expr: ScalarExprSpec::Input {
+                        name: "income".to_string(),
+                    },
+                },
+            },
+            DerivedSpec {
+                id: None,
+                name: "household_income".to_string(),
+                entity: "Household".to_string(),
+                dtype: DTypeSpec::Decimal,
+                unit: None,
+                source: None,
+                period: None,
+                source_url: None,
+                semantics: DerivedSemanticsSpec::Scalar {
+                    expr: ScalarExprSpec::SumRelated {
+                        relation: "member_of_household".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                        value: RelatedValueRefSpec::Derived {
+                            name: "person_income".to_string(),
+                        },
+                        where_clause: None,
+                    },
+                },
+            },
+        ],
+        ..ProgramSpec::default()
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: decimal_value("100"),
+            },
+            InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-2".to_string(),
+                interval: interval.clone(),
+                value: decimal_value("50"),
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-2".to_string(), "household-1".to_string()],
+                interval,
+            },
+        ],
+    };
+    // person_income is REQUESTED at household scope: must not fail,
+    // and must warm every person instance.
+    let queries = vec![ExecutionQuery {
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec![
+            "household_income".to_string(),
+            "person_income".to_string(),
+        ],
+    }];
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("household query with a member-rule output succeeds");
+
+    let result = &response.results[0];
+    // Aggregation is intact.
+    let household = serde_json::to_value(&result.outputs["household_income"])
+        .expect("output serialises");
+    assert_eq!(household["value"]["value"], "150");
+
+    // The per-instance view carries each member's value.
+    let person_trace = result
+        .instance_trace
+        .get("person_income")
+        .expect("person_income has an instance trace");
+    let one = serde_json::to_value(person_trace.get("person-1").expect("person-1 traced"))
+        .expect("node serialises");
+    let two = serde_json::to_value(person_trace.get("person-2").expect("person-2 traced"))
+        .expect("node serialises");
+    assert_eq!(one["value"]["value"], "100");
+    assert_eq!(two["value"]["value"], "50");
+
+    // The household-scope trace still has the aggregate.
+    assert!(result.trace.contains_key("household_income"));
+}

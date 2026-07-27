@@ -165,6 +165,7 @@ pub fn try_execute(
             },
             outputs,
             trace: BTreeMap::new(),
+            instance_trace: std::collections::BTreeMap::new(),
         });
     }
 
