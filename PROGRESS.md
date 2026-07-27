@@ -257,3 +257,28 @@ the stale comments, and pinned every case as a test.
   (`--release`) extension; the acceptance script
   `scratchpad/check_derived_n_lifetime.py` prints
   `earnings_total [3456000. 1922000.]`, `aime [8000. 5166.]` and all assertions pass.
+
+---
+
+## Closure sprint: issue #117 delegation relation design
+
+### State
+
+Design-only work is in progress on an additive RuleSpec contract for agency
+guidance that fulfills delegated authority. No implementation will begin until
+the design note has been posted to issue #117 for agreement.
+
+### Done
+
+- Read the closure-sprint preamble and issue #117.
+- Confirmed that RuleSpec already models legal graph edges as
+  `kind: source_relation`, including `delegates` and executable `sets`.
+- Identified that the design must extend that graph rather than add a parallel
+  top-level `overrides:` mechanism.
+
+### Next
+
+- Write and commit the proposed `supplies` schema, identities, temporal
+  semantics, compile-time gates, and rejection-test matrix.
+- Post that design as a comment on issue #117 before any implementation.
+- Publish a draft design PR if GitHub connectivity permits.
