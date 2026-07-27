@@ -4,8 +4,9 @@ Branch: `docs/released-binary-cli-contract` (from `origin/main`).
 
 ## State
 
-The released v0.1.1 and current-`main` CLI contracts are separated throughout
-the command guidance found by the documentation audit. Verification remains.
+Complete. The released v0.1.1 and current-`main` CLI contracts are separated
+throughout the command guidance found by the documentation audit, and the
+documentation-only verification gate passes.
 
 ## Done
 
@@ -31,8 +32,15 @@ the command guidance found by the documentation audit. Verification remains.
   `docs/jurisdiction-repos.md`; the explicit root example now uses `cargo run`.
 - Labeled the current-`main` root and `compile-composed` requirements in
   `docs/rulespec.md`, and distinguished the released v0.1.1 contract.
+- Verified the current-`main` contract with
+  `cargo run --locked --offline --quiet -- compile --help`.
+- Verified the v0.1.1 tags, worked example, and checksum warning against the
+  executed results supplied for issues #121 and #122.
+- Verified that the diff contains only Markdown files, has no whitespace
+  errors, has balanced code fences, and resolves every local link.
+- Completed independent contract and scope reviews with no defects found.
 
 ## Next
 
-- Verify line numbers, links, wording, and the final documentation-only diff.
-- Record the final report in the requested output file.
+- None. The local commits are ready for review. Do not push or open a pull
+  request.
