@@ -4,8 +4,8 @@ Branch: `docs/released-binary-cli-contract` (from `origin/main`).
 
 ## State
 
-The released-binary install path is corrected and ready for verification. The
-README and jurisdiction documentation still need their contract labels.
+The released v0.1.1 and current-`main` CLI contracts are separated throughout
+the command guidance found by the documentation audit. Verification remains.
 
 ## Done
 
@@ -27,11 +27,12 @@ README and jurisdiction documentation still need their contract labels.
   and `compile-composed` with repeatable `--rulespec-root`.
 - Separated the v0.1.1 and current-`main` CLI contracts in `README.md`, keeping
   the source-built `compile` and `compile-composed` documentation.
+- Labeled the release and current-`main` import-resolution contracts in
+  `docs/jurisdiction-repos.md`; the explicit root example now uses `cargo run`.
+- Labeled the current-`main` root and `compile-composed` requirements in
+  `docs/rulespec.md`, and distinguished the released v0.1.1 contract.
 
 ## Next
 
-- Label the source-built contract in `docs/jurisdiction-repos.md`.
-- Inspect and, if needed, label the current-`main` examples in
-  `docs/rulespec.md`.
 - Verify line numbers, links, wording, and the final documentation-only diff.
 - Record the final report in the requested output file.

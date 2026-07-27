@@ -169,12 +169,17 @@ checkout named `rulespec-<country>` with direct matching jurisdiction
 directories. For example, `us:` resolves below `rulespec-us/us/` and `us-co:`
 below `rulespec-us/us-co/`.
 
-Callers must supply at least one absolute, real, unaliased country checkout.
-The CLI uses required repeatable `--rulespec-root` arguments; Rust callers pass
-a validated `CanonicalRuleSpecRoots` to `load_rulespec_file`,
-`CompiledProgramArtifact::from_rulespec_file`, or `FsModuleSource`. There is no
-environment, cwd, ancestor, sibling-checkout, suffixed-worktree, or standalone
-jurisdiction-repository fallback.
+For current `main`, filesystem callers must supply at least one absolute, real,
+unaliased country checkout. The CLI built from `main` uses required repeatable
+`--rulespec-root` arguments; Rust callers pass a validated
+`CanonicalRuleSpecRoots` to `load_rulespec_file`,
+`CompiledProgramArtifact::from_rulespec_file`, or `FsModuleSource`. These
+current-`main` interfaces have no environment, cwd, ancestor, sibling-checkout,
+suffixed-worktree, or standalone jurisdiction-repository fallback.
+
+The released v0.1.1 CLI uses a different contract. Its `compile` command accepts
+`--program` and `--output` only and resolves canonical cross-repo imports
+without a root flag. See the [release instructions](install.md).
 
 Configured roots must remain trusted and quiescent throughout validation and
 compilation. This is a deterministic authority boundary, not a sandbox against
@@ -192,15 +197,16 @@ special paths, `.yml`/case-variant/double extensions, relative imports, and
 reserved or whitespace path components fail closed before compilation.
 
 `axiom-compose` emits an ephemeral import-bearing `rulespec/v1` composition,
-not an atomic module. Compile that output with the separate
-`compile-composed` command. Its input must be an absolute, real, unaliased
-`.yaml` outside every RuleSpec checkout with exact
+not an atomic module. The CLI built from current `main` compiles that output
+with the separate `compile-composed` command. Its input must be an absolute,
+real, unaliased `.yaml` outside every RuleSpec checkout with exact
 `module.kind: composition`; it still requires one or more explicit
 `--rulespec-root` arguments. Only fragmentless canonical atomic imports are
 allowed, and synthesized root rules remain originless. The removed top-level
-`extends` directive is rejected on both surfaces. The ordinary `compile` command
-rejects the ephemeral file, while `compile-composed` rejects atomic modules and
-declarative ProgramSpecs.
+`extends` directive is rejected on both surfaces. On current `main`, the
+ordinary `compile` command rejects the ephemeral file, while `compile-composed`
+rejects atomic modules and declarative ProgramSpecs. Release v0.1.1 does not
+provide `compile-composed`.
 
 Compiled artifacts make the input boundary explicit in
 `metadata.input_catalog`. Each runtime slot has a deterministic
