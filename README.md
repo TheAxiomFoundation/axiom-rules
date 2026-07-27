@@ -54,6 +54,24 @@ remain local formula symbols only.
 
 To install and verify a published executable, see [Install a released binary](docs/install.md).
 
+### Released v0.1.1 binary
+
+Release v0.1.1 uses a different CLI contract from current `main`. Its `compile`
+command accepts `--program` and `--output` only and resolves canonical
+cross-repo imports without a root flag:
+
+```bash
+axiom-rules-engine compile \
+  --program rulespec-uk/uk-coventry/policies/coventry/council-tax-reduction.yaml \
+  --output ctr.json
+axiom-rules-engine run-compiled --artifact ctr.json < household.json
+```
+
+The v0.1.1 binary does not provide `compile-composed`.
+
+### CLI built from current main
+
+Commands invoked through `cargo run` use the current `main` contract.
 Compile a RuleSpec file:
 
 ```bash

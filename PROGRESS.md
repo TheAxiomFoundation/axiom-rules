@@ -25,10 +25,13 @@ README and jurisdiction documentation still need their contract labels.
 - Added the verified v0.1.1 `compile` and `run-compiled` sequence, with no root
   flag, and separately retained the source-built `main` examples for `compile`
   and `compile-composed` with repeatable `--rulespec-root`.
+- Separated the v0.1.1 and current-`main` CLI contracts in `README.md`, keeping
+  the source-built `compile` and `compile-composed` documentation.
 
 ## Next
 
-- Separate and label the two CLI contracts in `README.md`.
 - Label the source-built contract in `docs/jurisdiction-repos.md`.
+- Inspect and, if needed, label the current-`main` examples in
+  `docs/rulespec.md`.
 - Verify line numbers, links, wording, and the final documentation-only diff.
 - Record the final report in the requested output file.
