@@ -229,6 +229,14 @@ is legally in the program, which delegation contract it fulfills, and for what
 period. The compiled node keeps its guidance ID, guidance corpus citation, and
 provision-backed annotation.
 
+Certification must also inspect existing `type: sets` endpoints before
+`apply_source_relation_sets` mutates the program. A `sets.value` whose actual
+origin is `guidance/` is rejected on this surface. Otherwise guidance semantics
+could be copied under a statute-owned target ID and citation, after which the
+dependency graph would contain no guidance-origin node for the omission gate
+to find. A future semantic-origin/taint model could preserve and validate that
+case, but the first contract does not have one.
+
 Moving the annual relation physically into the guidance module and reversing
 the import direction is a possible later architecture, but the concrete module
 cannot do that additively today: statute formulas consume guidance parameters
@@ -263,12 +271,17 @@ the effective semantics for the composed applicability period. It does not
 reuse issue #115's conservative `reachable` flag, which intentionally unions
 dependencies across every effective version.
 
-For annual history, disjoint supply relations are retained but out of scope.
-A relation whose interval is disjoint from the root applicability interval is
-ignored for the current closure computation. A relation that overlaps the root
-interval must match it exactly; partial overlap is rejected. This allows one
-statute module to retain 2026, 2027, and later edges and compile each year
-without deleting legal history.
+For annual history, a relation whose interval is disjoint from the root
+applicability interval is ignored for the current closure computation; an
+overlap must be exact. Retaining multiple years in one executable module is
+permitted only when all imported guidance declarations have globally unique
+local names and every effective formula version references the corresponding
+period-qualified name (for example, `eitc_earned_income_amounts_2026`).
+Canonical IDs alone are not enough because current formula lowering merges
+local declaration names. Same-named annual suppliers fail the existing
+uniqueness gate. Until guidance names are migrated or namespaced/late-bound
+imports exist, certification is one supplier period per compiled root and
+must not claim that unresolved historical edges were retained.
 
 For every referenced `delegated_by`, the union of bindings valid for the
 applicability period must equal the delegation's declared value IDs. Extra
@@ -322,10 +335,12 @@ Certification compilation of `supplies` proceeds fail-closed:
    conflicting supplies.
 7. Check closure across the complete value vocabulary, including no-supplier
    and partial-supplier cases.
-8. Traverse the period-applicable dependency graph and check every
+8. Resolve all `sets` endpoints before semantics copying and reject a
+   guidance-origin value on the certification surface.
+9. Traverse the period-applicable dependency graph and check every
    non-guidance-to-guidance entry edge so omission of the relation itself
    cannot bypass certification.
-9. Retain the validated graph and closure result without rewriting executable
+10. Retain the validated graph and closure result without rewriting executable
    identities or provenance.
 
 A guidance module compiled alone, with no legal relation in that module, still
@@ -378,9 +393,12 @@ Every new gate needs a fixture that constructs the rejected input. At minimum:
 - duplicate, overlapping, or conflicting suppliers;
 - a partially overlapping annual edge, while disjoint historical edges remain
   valid and out of scope;
+- same-named annual guidance declarations in one merged program;
 - no supplier and partial closure; and
 - a period-applicable cross-origin guidance entry introduced by a plain import
   with no legal edge;
+- a guidance-owned `sets.value` copied into a statute-owned target before
+  dependency traversal;
 - guidance used for an unsupported non-supply role on the v1 certification
   surface.
 
@@ -388,8 +406,8 @@ Positive tests cover a fully closed guidance relation, closure split across
 multiple singular provision modules, artifact round-trip/recomputation,
 in-memory module and corpus sources, filesystem roots, an annual supply that
 explicitly allows contained monthly queries, a statute retaining disjoint 2026
-and 2027 relations compiled once for each year, and unchanged legacy
-modules/artifacts.
+and 2027 relations with period-qualified guidance names and compiling once for
+each year, and unchanged legacy modules/artifacts.
 
 One adversarial test must prove that a same-named statute rule cannot receive
 the guidance rule's relation or provenance, another must prove that `supplies`
