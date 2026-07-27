@@ -264,9 +264,11 @@ the stale comments, and pinned every case as a test.
 
 ### State
 
-Design-only work is in progress on an additive RuleSpec contract for agency
-guidance that fulfills delegated authority. No implementation will begin until
-the design note has been posted to issue #117 for agreement.
+The design-only proposal is complete and independently reviewed. No
+implementation has begun. Posting is blocked in this environment: GitHub issue
+comment writes were attempted through the available connector and cancelled
+without changing remote state; the shell Git remote cannot resolve
+`github.com`.
 
 ### Done
 
@@ -275,10 +277,24 @@ the design note has been posted to issue #117 for agreement.
   `kind: source_relation`, including `delegates` and executable `sets`.
 - Identified that the design must extend that graph rather than add a parallel
   top-level `overrides:` mechanism.
+- Wrote `docs/delegated-guidance.md` with a typed, non-destructive `supplies`
+  relation; a program applicability period; pinned-corpus resolution;
+  artifact-retained legal edges; closure/omission semantics; and a complete
+  rejection-test matrix.
+- Independent review corrected the concrete statute/corpus identities, removed
+  a legally incorrect maximum-credit example, separated conceptual delegation
+  contracts from executable nodes, prohibited reuse of provenance-erasing
+  `sets` lowering, and distinguished composed certification from standalone
+  authoring validation.
+- Verified the existing singular corpus document root
+  `us/guidance/irs/rev-proc-2025-32`.
+- Attempted to post the proposal to issue #117 twice; both GitHub write calls
+  were cancelled with no remote mutation.
 
 ### Next
 
-- Write and commit the proposed `supplies` schema, identities, temporal
-  semantics, compile-time gates, and rejection-test matrix.
-- Post that design as a comment on issue #117 before any implementation.
-- Publish a draft design PR if GitHub connectivity permits.
+- Post the committed note to issue #117 and obtain schema agreement.
+- Push `codex/delegation-design-117` and open a draft design PR referencing
+  #117 when a writable GitHub path is available.
+- Only after agreement, implement the additive schema and every documented
+  rejection fixture.
