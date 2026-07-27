@@ -4,8 +4,8 @@ Branch: `docs/released-binary-cli-contract` (from `origin/main`).
 
 ## State
 
-The worktree and branch are verified. The documentation audit is complete, and
-the CLI-contract corrections are ready to edit.
+The released-binary install path is corrected and ready for verification. The
+README and jurisdiction documentation still need their contract labels.
 
 ## Done
 
@@ -19,12 +19,15 @@ the CLI-contract corrections are ready to edit.
   `compile --rulespec-root` on lines 52–55 without identifying it as the
   source-built `main` contract.
 - Confirmed the requested scope is documentation only.
+- Updated `docs/install.md` to download and attest release `v0.1.1`.
+- Documented the known macOS `shasum --check` trailing-blank-line warning and
+  the successful `OK` result.
+- Added the verified v0.1.1 `compile` and `run-compiled` sequence, with no root
+  flag, and separately retained the source-built `main` examples for `compile`
+  and `compile-composed` with repeatable `--rulespec-root`.
 
 ## Next
 
-- Update `docs/install.md` to download and attest release `v0.1.1`, explain the
-  macOS checksum warning, and separate released-binary commands from
-  source-built `main` commands.
 - Separate and label the two CLI contracts in `README.md`.
 - Label the source-built contract in `docs/jurisdiction-repos.md`.
 - Verify line numbers, links, wording, and the final documentation-only diff.
