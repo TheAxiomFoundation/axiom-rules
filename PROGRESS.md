@@ -286,10 +286,16 @@ without changing remote state; the shell Git remote cannot resolve
   contracts from executable nodes, prohibited reuse of provenance-erasing
   `sets` lowering, and distinguished composed certification from standalone
   authoring validation.
+- Adversarial re-review closed period-kind ambiguity, multi-year name
+  collisions, both directions of guidance laundering through `sets`,
+  declared-versus-lowered kind swaps, omission bypasses, and the URL-only
+  corpus-index gap. Two independent final reviews report no remaining
+  high/medium design finding.
 - Verified the existing singular corpus document root
   `us/guidance/irs/rev-proc-2025-32`.
-- Attempted to post the proposal to issue #117 twice; both GitHub write calls
-  were cancelled with no remote mutation.
+- Attempted to post the proposal through both the GitHub write connector and
+  `gh issue comment`; connector writes were cancelled and the CLI could not
+  reach `api.github.com`, so no remote mutation occurred.
 
 ### Next
 
