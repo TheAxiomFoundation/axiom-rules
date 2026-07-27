@@ -392,6 +392,7 @@ enum RuleOriginSurface {
     #[default]
     Unassigned,
     AtomicModule,
+    #[cfg_attr(not(feature = "fs"), allow(dead_code))]
     CompositionRoot,
 }
 
