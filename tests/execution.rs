@@ -97,7 +97,7 @@ fn fast_mode_matches_explain_mode_on_batch() {
     let dataset = simple_dataset(&period);
 
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Fast,
+        mode: ExecutionMode::Explain,
         program: program.clone(),
         dataset: dataset.clone(),
         queries: queries.clone(),
@@ -112,6 +112,9 @@ fn fast_mode_matches_explain_mode_on_batch() {
     })
     .expect("fast request succeeds");
 
+    assert_eq!(explain.metadata.requested_mode, ExecutionMode::Explain);
+    assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(explain.metadata.fallback_reason, None);
     assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
     assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
     assert_eq!(fast.metadata.fallback_reason, None);
@@ -617,7 +620,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Fast,
+        mode: ExecutionMode::Explain,
         program,
         dataset,
         queries,
@@ -635,6 +638,9 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         "unexpected fallback reason: {:?}",
         fast.metadata.fallback_reason
     );
+    assert_eq!(explain.metadata.requested_mode, ExecutionMode::Explain);
+    assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(explain.metadata.fallback_reason, None);
     assert_eq!(
         serde_json::to_value(&fast.results).expect("fast results serialise"),
         serde_json::to_value(&explain.results).expect("explain results serialise")
