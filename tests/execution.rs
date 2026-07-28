@@ -470,6 +470,127 @@ rules:
     }
 }
 
+#[test]
+fn single_unbounded_derived_version_does_not_apply_before_its_effective_date() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: dated_belgian_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2022-01-01
+        formula: "17"
+"#;
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
+        .expect("single-version derived RuleSpec lowers");
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        assert!(matches!(
+            integer_result(
+                &program,
+                mode.clone(),
+                2019,
+                1,
+                1,
+                "dated_belgian_amount"
+            ),
+            Err(ApiError::Eval(EvalError::MissingDerivedFormulaVersion { derived, .. }))
+                if derived == "dated_belgian_amount"
+        ));
+        assert_eq!(
+            integer_result(&program, mode, 2022, 1, 1, "dated_belgian_amount")
+                .expect("derived applies on its effective date"),
+            17
+        );
+    }
+}
+
+#[test]
+fn exhaustive_match_uses_wildcard_only_for_unmatched_subjects() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+              _ => 99
+"#;
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
+        .expect("exhaustive match lowers");
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Custom {
+            name: "Day".to_string(),
+        },
+        start: date,
+        end: date,
+    };
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode,
+            program: program.clone(),
+            dataset: DatasetSpec {
+                inputs: [
+                    ("single-filer", "single"),
+                    ("joint-filer", "joint"),
+                    ("widowed-filer", "widowed"),
+                ]
+                .into_iter()
+                .map(|(entity_id, filing_status)| InputRecordSpec {
+                    name: "filing_status".to_string(),
+                    entity: "TaxUnit".to_string(),
+                    entity_id: entity_id.to_string(),
+                    interval: IntervalSpec {
+                        start: date,
+                        end: date,
+                    },
+                    value: ScalarValueSpec::Text {
+                        value: filing_status.to_string(),
+                    },
+                })
+                .collect(),
+                relations: Vec::new(),
+            },
+            queries: ["single-filer", "joint-filer", "widowed-filer"]
+                .into_iter()
+                .map(|entity_id| ExecutionQuery {
+                    assessment_date: None,
+                    entity_id: entity_id.to_string(),
+                    period: period.clone(),
+                    outputs: vec!["filing_credit".to_string()],
+                })
+                .collect(),
+        })
+        .expect("match executes");
+
+        let values = response
+            .results
+            .iter()
+            .map(|result| {
+                integer_output(
+                    result
+                        .outputs
+                        .get("filing_credit")
+                        .expect("filing_credit output"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![10, 20, 99]);
+    }
+}
+
 fn integer_result(
     program: &ProgramSpec,
     mode: ExecutionMode,

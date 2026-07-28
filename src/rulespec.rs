@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 #[cfg(feature = "fs")]
 use std::fs;
 #[cfg(feature = "fs")]
@@ -87,10 +88,32 @@ pub enum RuleSpecError {
         "RuleSpec rule `{name}` declares `rounding` but has kind `{kind}`; output rounding applies only to `derived` currency rules"
     )]
     RoundingOnNonDerivedRule { name: String, kind: String },
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` declares unsupported `default`; rule-level defaults have no defined semantics, so remove it and express the fallback explicitly in the formula"
+    )]
+    UnsupportedDefault { path: String, name: String },
     #[error("RuleSpec rule `{name}` has no formula version")]
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
     MissingEffectiveFrom { name: String },
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` declares more than one version effective from {effective_from}; give every version a unique effective_from"
+    )]
+    DuplicateEffectiveFrom {
+        path: String,
+        name: String,
+        effective_from: NaiveDate,
+    },
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` has overlapping explicit version ranges: {first_from}..{first_to} overlaps the version starting {second_from}; end the first version before {second_from}"
+    )]
+    OverlappingVersionRanges {
+        path: String,
+        name: String,
+        first_from: NaiveDate,
+        first_to: NaiveDate,
+        second_from: NaiveDate,
+    },
     #[error("RuleSpec parameter table `{name}` has values but no indexed_by")]
     MissingIndexedBy { name: String },
     #[error(
@@ -214,6 +237,14 @@ pub enum RuleSpecError {
         new: usize,
     },
     #[error(
+        "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
+    )]
+    ConflictingUnitDeclarations {
+        name: String,
+        first: String,
+        second: String,
+    },
+    #[error(
         "RuleSpec module `{path}` declares source_verification.source_sha256 `{value}`, which is not a 64-character hexadecimal SHA-256 digest"
     )]
     InvalidSourceSha256 { path: String, value: String },
@@ -223,6 +254,85 @@ pub enum RuleSpecError {
         "RuleSpec module `{path}` declares removed plural `corpus_citation_paths`; every source/proof node must declare exactly one singular `corpus_citation_path`"
     )]
     PluralCorpusCitationPaths { path: String },
+    #[error("strict RuleSpec validation failed:\n{0}")]
+    StrictDiagnostics(RuleSpecDiagnosticReport),
+}
+
+/// Options for RuleSpec semantic lowering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuleSpecLoweringOptions {
+    /// Promote compatibility diagnostics to hard errors.
+    pub strict: bool,
+}
+
+impl RuleSpecLoweringOptions {
+    pub const fn strict() -> Self {
+        Self { strict: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleSpecDiagnosticCode {
+    NonExhaustiveMatch,
+}
+
+impl RuleSpecDiagnosticCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NonExhaustiveMatch => "non_exhaustive_match",
+        }
+    }
+}
+
+/// A compatibility diagnostic produced while lowering a RuleSpec module.
+///
+/// Diagnostics are warnings under the default options and errors under
+/// [`RuleSpecLoweringOptions::strict`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleSpecDiagnostic {
+    pub code: RuleSpecDiagnosticCode,
+    /// Canonical module target, or `<memory>` for an in-memory document.
+    pub path: String,
+    pub rule: String,
+    pub occurrences: usize,
+}
+
+impl fmt::Display for RuleSpecDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let expression = if self.occurrences == 1 {
+            "expression"
+        } else {
+            "expressions"
+        };
+        write!(
+            formatter,
+            "RuleSpec file `{}` rule `{}` has {} non-exhaustive `match` {expression}; add a final `_ => <fallback>` arm to each match",
+            self.path, self.rule, self.occurrences
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleSpecDiagnosticReport {
+    pub diagnostics: Vec<RuleSpecDiagnostic>,
+}
+
+impl fmt::Display for RuleSpecDiagnosticReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            write!(formatter, "{diagnostic}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RuleSpecLoweringOutcome {
+    pub program: ProgramSpec,
+    pub diagnostics: Vec<RuleSpecDiagnostic>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -749,6 +859,15 @@ fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
 }
 
 pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome = lower_rulespec_str_with_options(source, RuleSpecLoweringOptions::default())?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+pub fn lower_rulespec_str_with_options(
+    source: &str,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     if !looks_like_rulespec_yaml(source) {
         return Err(RuleSpecError::MissingDiscriminator);
     }
@@ -759,7 +878,7 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
     document.validate_atomic_module_metadata("<memory>")?;
     document.assign_origin_target(None);
-    document.to_program_spec()
+    document.to_program_spec_with_options(options)
 }
 
 #[cfg(feature = "fs")]
@@ -767,9 +886,20 @@ pub fn load_rulespec_file(
     path: impl AsRef<Path>,
     roots: &CanonicalRuleSpecRoots,
 ) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome = load_rulespec_file_with_options(path, roots, RuleSpecLoweringOptions::default())?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+#[cfg(feature = "fs")]
+pub fn load_rulespec_file_with_options(
+    path: impl AsRef<Path>,
+    roots: &CanonicalRuleSpecRoots,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let target = roots.target_for_path(path.as_ref())?;
     let source = crate::source::FsModuleSource::from_validated_roots(roots.clone());
-    load_rulespec_with_source(&target, &source)
+    load_rulespec_with_source_with_options(&target, &source, options)
 }
 
 /// Load an ephemeral RuleSpec program emitted by `axiom-compose`.
@@ -783,6 +913,18 @@ pub fn load_composed_rulespec_file(
     path: impl AsRef<Path>,
     roots: &CanonicalRuleSpecRoots,
 ) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome =
+        load_composed_rulespec_file_with_options(path, roots, RuleSpecLoweringOptions::default())?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+#[cfg(feature = "fs")]
+pub fn load_composed_rulespec_file_with_options(
+    path: impl AsRef<Path>,
+    roots: &CanonicalRuleSpecRoots,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let path = path.as_ref();
     validate_exact_regular_yaml(path)?;
     if roots.contains_path(path) {
@@ -812,7 +954,7 @@ pub fn load_composed_rulespec_file(
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
-    combined.to_program_spec()
+    combined.to_program_spec_with_options(options)
 }
 
 /// Load and lower the module at `root_target` (canonical form, for example
@@ -828,10 +970,30 @@ pub fn load_rulespec_with_source(
     root_target: &str,
     source: &dyn ModuleSource,
 ) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome = load_rulespec_with_source_with_options(
+        root_target,
+        source,
+        RuleSpecLoweringOptions::default(),
+    )?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+pub fn load_rulespec_with_source_with_options(
+    root_target: &str,
+    source: &dyn ModuleSource,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let root_target = validate_module_target(root_target)?;
     let mut context = SourceLoadContext::default();
     let document = load_rulespec_document_from_source(&root_target, source, &mut context)?;
-    document.to_program_spec()
+    document.to_program_spec_with_options(options)
+}
+
+fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!("warning[{}]: {diagnostic}", diagnostic.code.as_str());
+    }
 }
 
 #[derive(Default)]
@@ -1706,9 +1868,25 @@ impl RulesDocument {
     }
 
     pub fn to_program_spec(&self) -> Result<ProgramSpec, RuleSpecError> {
+        let outcome = self.to_program_spec_with_options(RuleSpecLoweringOptions::default())?;
+        emit_rule_spec_diagnostics(&outcome.diagnostics);
+        Ok(outcome.program)
+    }
+
+    pub fn to_program_spec_with_options(
+        &self,
+        options: RuleSpecLoweringOptions,
+    ) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
+        let diagnostics = self.compatibility_diagnostics()?;
+        if options.strict && !diagnostics.is_empty() {
+            return Err(RuleSpecError::StrictDiagnostics(RuleSpecDiagnosticReport {
+                diagnostics,
+            }));
+        }
         if !self.relations.is_empty() {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
         }
+        self.validate_unit_declarations()?;
         let mut formula_source = String::new();
         self.write_header(&mut formula_source);
 
@@ -1742,6 +1920,8 @@ impl RulesDocument {
                 }
                 Err(error) => return Err(error),
             };
+            rule.validate_version_ranges()?;
+            rule.reject_unsupported_default()?;
             // Rounding is an output-rule concern; reject it on any non-derived
             // kind up front (a parameter/relation with `rounding:` would
             // otherwise be silently dropped by the name-match that attaches it).
@@ -1822,7 +2002,56 @@ impl RulesDocument {
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
-        Ok(program)
+        Ok(RuleSpecLoweringOutcome {
+            program,
+            diagnostics,
+        })
+    }
+
+    fn compatibility_diagnostics(&self) -> Result<Vec<RuleSpecDiagnostic>, RuleSpecError> {
+        let mut diagnostics = Vec::new();
+        for rule in &self.rules {
+            let mut occurrences = 0;
+            for version in rule.effective_versions() {
+                if let Some(formula) = version
+                    .formula
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|formula| !formula.is_empty())
+                {
+                    occurrences += crate::formula::non_exhaustive_match_count(formula)?;
+                }
+            }
+            if occurrences > 0 {
+                diagnostics.push(RuleSpecDiagnostic {
+                    code: RuleSpecDiagnosticCode::NonExhaustiveMatch,
+                    path: rule
+                        .origin_target
+                        .clone()
+                        .unwrap_or_else(|| "<memory>".to_string()),
+                    rule: rule.name.clone(),
+                    occurrences,
+                });
+            }
+        }
+        Ok(diagnostics)
+    }
+
+    fn validate_unit_declarations(&self) -> Result<(), RuleSpecError> {
+        let mut declarations: HashMap<&str, &crate::spec::UnitKindSpec> = HashMap::new();
+        for unit in &self.units {
+            if let Some(first) = declarations.get(unit.name.as_str())
+                && !unit_kinds_equal(first, &unit.kind)
+            {
+                return Err(RuleSpecError::ConflictingUnitDeclarations {
+                    name: unit.name.clone(),
+                    first: unit_kind_label(first),
+                    second: unit_kind_label(&unit.kind),
+                });
+            }
+            declarations.entry(&unit.name).or_insert(&unit.kind);
+        }
+        Ok(())
     }
 
     fn apply_rule_ids(&self, program: &mut ProgramSpec) {
@@ -1897,6 +2126,12 @@ impl RulesDocument {
 }
 
 impl RuleDefinition {
+    fn source_path(&self) -> String {
+        self.origin_target
+            .clone()
+            .unwrap_or_else(|| "<memory>".to_string())
+    }
+
     fn canonical_rule_id(&self) -> Option<String> {
         self.origin_target
             .as_ref()
@@ -1940,6 +2175,56 @@ impl RuleDefinition {
             }];
         }
         Vec::new()
+    }
+
+    fn validate_version_ranges(&self) -> Result<(), RuleSpecError> {
+        let mut ranges = self
+            .effective_versions()
+            .into_iter()
+            .filter_map(|version| {
+                version
+                    .effective_from
+                    .map(|effective_from| (effective_from, version.effective_to))
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|(effective_from, _)| *effective_from);
+
+        for window in ranges.windows(2) {
+            let (first_from, first_to) = window[0];
+            let (second_from, _) = window[1];
+            if first_from == second_from {
+                return Err(RuleSpecError::DuplicateEffectiveFrom {
+                    path: self.source_path(),
+                    name: self.name.clone(),
+                    effective_from: first_from,
+                });
+            }
+            // An absent upper bound is intentionally superseded by the next
+            // later-starting version. Only an explicit inclusive upper bound
+            // can contradict the next version's commencement.
+            if let Some(first_to) = first_to
+                && first_to >= second_from
+            {
+                return Err(RuleSpecError::OverlappingVersionRanges {
+                    path: self.source_path(),
+                    name: self.name.clone(),
+                    first_from,
+                    first_to,
+                    second_from,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_unsupported_default(&self) -> Result<(), RuleSpecError> {
+        if self.default.is_some() {
+            return Err(RuleSpecError::UnsupportedDefault {
+                path: self.source_path(),
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn is_parameter_table(&self) -> bool {
@@ -2229,7 +2514,6 @@ impl RuleDefinition {
         write_metadata(out, "unit", self.unit.as_deref());
         write_metadata(out, "label", self.label.as_deref());
         write_metadata(out, "description", self.description.as_deref());
-        write_metadata(out, "default", self.default.as_deref());
         write_metadata(out, "indexed_by", self.indexed_by.as_deref());
         write_metadata(out, "status", self.status.as_deref());
         let (source, source_url) = self.effective_source();
@@ -2303,6 +2587,38 @@ impl RuleDefinition {
             .clone()
             .or_else(|| self.sources.iter().find_map(|source| source.url.clone()));
         (citation, url)
+    }
+}
+
+fn unit_kinds_equal(left: &crate::spec::UnitKindSpec, right: &crate::spec::UnitKindSpec) -> bool {
+    use crate::spec::UnitKindSpec;
+
+    match (left, right) {
+        (
+            UnitKindSpec::Currency { minor_units: left },
+            UnitKindSpec::Currency { minor_units: right },
+        ) => left == right,
+        (UnitKindSpec::Count, UnitKindSpec::Count)
+        | (UnitKindSpec::Ratio, UnitKindSpec::Ratio)
+        | (UnitKindSpec::Duration, UnitKindSpec::Duration) => true,
+        (UnitKindSpec::Custom { label: left }, UnitKindSpec::Custom { label: right }) => {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+fn unit_kind_label(kind: &crate::spec::UnitKindSpec) -> String {
+    use crate::spec::UnitKindSpec;
+
+    match kind {
+        UnitKindSpec::Currency { minor_units } => {
+            format!("currency(minor_units: {minor_units})")
+        }
+        UnitKindSpec::Count => "count".to_string(),
+        UnitKindSpec::Ratio => "ratio".to_string(),
+        UnitKindSpec::Duration => "duration".to_string(),
+        UnitKindSpec::Custom { label } => format!("custom(label: {label})"),
     }
 }
 
