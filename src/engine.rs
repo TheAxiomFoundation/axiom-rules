@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -22,6 +22,14 @@ pub enum EvalError {
         entity_id: String,
         period_start: chrono::NaiveDate,
         period_end: chrono::NaiveDate,
+    },
+    #[error(
+        "ambiguous input `{name}` for entity `{entity_id}`: records effective from {effective_from} have conflicting values; merge or split the spells so one value applies at each start date"
+    )]
+    AmbiguousInput {
+        name: String,
+        entity_id: String,
+        effective_from: chrono::NaiveDate,
     },
     #[error("unit `{0}` was not declared")]
     UnknownUnit(String),
@@ -109,11 +117,124 @@ pub enum EvalError {
     },
 }
 
+/// Validate the one unresolvable tie in the input-spell precedence contract.
+///
+/// Covering records are resolved by latest `interval.start`. Two values for the
+/// same canonical fact, entity, and start date have equal precedence, so
+/// choosing either would reintroduce dataset-order semantics. Equal duplicates
+/// are harmless; conflicting values are rejected before either execution mode
+/// runs.
+pub(crate) fn validate_input_spells(data: &DataSet) -> Result<(), EvalError> {
+    let mut values_by_start: HashMap<(&str, &str, chrono::NaiveDate), &ScalarValue> =
+        HashMap::new();
+    for record in &data.inputs {
+        let key = (
+            record.name.as_str(),
+            record.entity_id.as_str(),
+            record.interval.start,
+        );
+        if let Some(existing) = values_by_start.get(&key) {
+            if *existing != &record.value {
+                return Err(EvalError::AmbiguousInput {
+                    name: record.name.clone(),
+                    entity_id: record.entity_id.clone(),
+                    effective_from: record.interval.start,
+                });
+            }
+        } else {
+            values_by_start.insert(key, &record.value);
+        }
+    }
+    Ok(())
+}
+
+/// Build the order-independent, single-period input view consumed by Fast.
+///
+/// Bulk execution handles one shared query period and otherwise falls back to
+/// Explain. Resolve every fact (including facts on related entities) once in a
+/// single O(N) pass so the bulk evaluator cannot overwrite a newer covering
+/// spell with an older record that happens to appear later in the dataset.
+pub(crate) fn resolve_inputs_for_period(data: &DataSet, period: &Period) -> DataSet {
+    let mut selected_by_fact: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut inputs = Vec::new();
+
+    for record in &data.inputs {
+        if !record.interval.contains_period(period) {
+            continue;
+        }
+        let key = (record.name.as_str(), record.entity_id.as_str());
+        if let Some(&selected_index) = selected_by_fact.get(&key) {
+            let selected: &crate::model::InputRecord = &inputs[selected_index];
+            if record.interval.start > selected.interval.start {
+                inputs[selected_index] = record.clone();
+            }
+        } else {
+            selected_by_fact.insert(key, inputs.len());
+            inputs.push(record.clone());
+        }
+    }
+
+    DataSet {
+        inputs,
+        relations: data.relations.clone(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct CacheKey {
-    derived: String,
-    entity_id: String,
-    period: Period,
+pub(crate) struct CacheKey {
+    pub(crate) derived: String,
+    pub(crate) entity_id: String,
+    pub(crate) period: Period,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TraceSkipReason {
+    ShortCircuit,
+    BranchNotSelected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SkippedTraceDependency {
+    Derived {
+        key: CacheKey,
+        reason: TraceSkipReason,
+    },
+    Parameter {
+        parameter: String,
+        reason: TraceSkipReason,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ParameterTraceRead {
+    pub(crate) parameter: String,
+    pub(crate) index: i64,
+    pub(crate) value: ScalarValue,
+    pub(crate) effective_from: chrono::NaiveDate,
+    pub(crate) effective_to: Option<chrono::NaiveDate>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NodeExecutionTrace {
+    pub(crate) dependencies: Vec<CacheKey>,
+    pub(crate) not_evaluated_dependencies: Vec<SkippedTraceDependency>,
+    pub(crate) parameter_reads: Vec<ParameterTraceRead>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum EvaluatedTraceValue {
+    Scalar {
+        value: ScalarValue,
+        pre_rounding_value: Option<ScalarValue>,
+    },
+    Judgment(JudgmentOutcome),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EvaluatedTraceInstance {
+    pub(crate) key: CacheKey,
+    pub(crate) value: EvaluatedTraceValue,
+    pub(crate) execution: NodeExecutionTrace,
 }
 
 #[derive(Clone, Copy)]
@@ -146,6 +267,8 @@ pub struct Engine<'a> {
     /// the value; the trace uses it to show the rounding step for audit.
     pre_rounding_cache: HashMap<CacheKey, ScalarValue>,
     judgment_cache: HashMap<CacheKey, JudgmentOutcome>,
+    execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
+    active_evaluations: Vec<CacheKey>,
 }
 
 impl<'a> Engine<'a> {
@@ -182,6 +305,8 @@ impl<'a> Engine<'a> {
             scalar_cache: HashMap::new(),
             pre_rounding_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
+            execution_trace: HashMap::new(),
+            active_evaluations: Vec::new(),
         }
     }
 
@@ -208,12 +333,20 @@ impl<'a> Engine<'a> {
                 at: period.start,
             }
         })?;
-        let value = match semantics {
-            DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr, entity_id, period)?,
+        self.execution_trace.entry(key.clone()).or_default();
+        self.active_evaluations.push(key.clone());
+        let evaluated = match semantics {
+            DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr, entity_id, period),
             DerivedSemantics::Judgment(_) => {
-                return Err(EvalError::ExpectedScalar(derived_name.to_string()));
+                Err(EvalError::ExpectedScalar(derived_name.to_string()))
             }
         };
+        let finished = self
+            .active_evaluations
+            .pop()
+            .expect("scalar evaluation pushed an active trace key");
+        debug_assert_eq!(finished, key);
+        let value = evaluated?;
         // Apply the rule's opt-in output rounding before caching, so the
         // rounded value is what both direct queries and dependent rules
         // (`ScalarExpr::Derived`) observe. Absent `rounding` is a no-op. When
@@ -250,14 +383,69 @@ impl<'a> Engine<'a> {
                 at: period.start,
             }
         })?;
-        let value = match semantics {
-            DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr, entity_id, period)?,
+        self.execution_trace.entry(key.clone()).or_default();
+        self.active_evaluations.push(key.clone());
+        let evaluated = match semantics {
+            DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr, entity_id, period),
             DerivedSemantics::Scalar(_) => {
-                return Err(EvalError::ExpectedJudgment(derived_name.to_string()));
+                Err(EvalError::ExpectedJudgment(derived_name.to_string()))
             }
         };
+        let finished = self
+            .active_evaluations
+            .pop()
+            .expect("judgment evaluation pushed an active trace key");
+        debug_assert_eq!(finished, key);
+        let value = evaluated?;
         self.judgment_cache.insert(key, value);
         Ok(value)
+    }
+
+    pub(crate) fn evaluated_trace_instances(
+        &self,
+        period: &Period,
+        root_entity_id: &str,
+    ) -> Vec<EvaluatedTraceInstance> {
+        let mut instances = Vec::with_capacity(self.scalar_cache.len() + self.judgment_cache.len());
+        for (key, value) in &self.scalar_cache {
+            if key.period != *period {
+                continue;
+            }
+            instances.push(EvaluatedTraceInstance {
+                key: key.clone(),
+                value: EvaluatedTraceValue::Scalar {
+                    value: value.clone(),
+                    pre_rounding_value: self.pre_rounding_cache.get(key).cloned(),
+                },
+                execution: self.execution_trace.get(key).cloned().unwrap_or_default(),
+            });
+        }
+        for (key, outcome) in &self.judgment_cache {
+            if key.period != *period {
+                continue;
+            }
+            instances.push(EvaluatedTraceInstance {
+                key: key.clone(),
+                value: EvaluatedTraceValue::Judgment(*outcome),
+                execution: self.execution_trace.get(key).cloned().unwrap_or_default(),
+            });
+        }
+        let mut reachable = HashSet::new();
+        let mut pending: Vec<_> = instances
+            .iter()
+            .filter(|instance| instance.key.entity_id == root_entity_id)
+            .map(|instance| instance.key.clone())
+            .collect();
+        while let Some(key) = pending.pop() {
+            if !reachable.insert(key.clone()) {
+                continue;
+            }
+            if let Some(execution) = self.execution_trace.get(&key) {
+                pending.extend(execution.dependencies.iter().cloned());
+            }
+        }
+        instances.retain(|instance| reachable.contains(&instance.key));
+        instances
     }
 
     pub fn cached_scalar(
@@ -308,6 +496,96 @@ impl<'a> Engine<'a> {
             .copied()
     }
 
+    fn record_evaluated_dependency(&mut self, key: CacheKey) {
+        let Some(parent) = self.active_evaluations.last().cloned() else {
+            return;
+        };
+        let trace = self.execution_trace.entry(parent).or_default();
+        if !trace.dependencies.contains(&key) {
+            trace.dependencies.push(key);
+        }
+    }
+
+    fn record_skipped_dependency(&mut self, dependency: SkippedTraceDependency) {
+        let Some(parent) = self.active_evaluations.last().cloned() else {
+            return;
+        };
+        let trace = self.execution_trace.entry(parent).or_default();
+        if !trace.not_evaluated_dependencies.contains(&dependency) {
+            trace.not_evaluated_dependencies.push(dependency);
+        }
+    }
+
+    fn record_parameter_read(&mut self, read: ParameterTraceRead) {
+        let Some(parent) = self.active_evaluations.last().cloned() else {
+            return;
+        };
+        let trace = self.execution_trace.entry(parent).or_default();
+        if !trace.parameter_reads.contains(&read) {
+            trace.parameter_reads.push(read);
+        }
+    }
+
+    fn record_skipped_scalar_dependencies(
+        &mut self,
+        expr: &ScalarExpr,
+        entity_id: &str,
+        period: &Period,
+        reason: TraceSkipReason,
+    ) {
+        let mut derived = Vec::new();
+        let mut parameters = Vec::new();
+        collect_scalar_trace_references(expr, &mut derived, &mut parameters);
+        for name in derived {
+            self.record_skipped_dependency(SkippedTraceDependency::Derived {
+                key: CacheKey {
+                    derived: name,
+                    entity_id: entity_id.to_string(),
+                    period: period.clone(),
+                },
+                reason,
+            });
+        }
+        for parameter in parameters {
+            self.record_skipped_dependency(SkippedTraceDependency::Parameter { parameter, reason });
+        }
+    }
+
+    fn record_skipped_judgment_dependencies(
+        &mut self,
+        expr: &JudgmentExpr,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+        reason: TraceSkipReason,
+    ) {
+        let mut derived = Vec::new();
+        let mut parameters = Vec::new();
+        collect_judgment_trace_references(expr, &mut derived, &mut parameters);
+        for name in derived {
+            let target_entity_id = self
+                .program
+                .derived
+                .get(&name)
+                .and_then(|dependency| {
+                    relation_context.and_then(|context| context.entity_id_for(&dependency.entity))
+                })
+                .unwrap_or(entity_id)
+                .to_string();
+            self.record_skipped_dependency(SkippedTraceDependency::Derived {
+                key: CacheKey {
+                    derived: name,
+                    entity_id: target_entity_id,
+                    period: period.clone(),
+                },
+                reason,
+            });
+        }
+        for parameter in parameters {
+            self.record_skipped_dependency(SkippedTraceDependency::Parameter { parameter, reason });
+        }
+    }
+
     fn get_derived(&self, name: &str) -> Result<&Derived, EvalError> {
         self.program
             .derived
@@ -340,7 +618,14 @@ impl<'a> Engine<'a> {
                     Err(other) => Err(other),
                 }
             }
-            ScalarExpr::Derived(name) => self.evaluate_scalar(name, entity_id, period),
+            ScalarExpr::Derived(name) => {
+                self.record_evaluated_dependency(CacheKey {
+                    derived: name.clone(),
+                    entity_id: entity_id.to_string(),
+                    period: period.clone(),
+                });
+                self.evaluate_scalar(name, entity_id, period)
+            }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 let lookup_key = self
                     .eval_scalar_expr(index, entity_id, period)?
@@ -515,8 +800,20 @@ impl<'a> Engine<'a> {
                     .eval_judgment_expr(condition, entity_id, period)?
                     .is_holds()
                 {
+                    self.record_skipped_scalar_dependencies(
+                        else_expr,
+                        entity_id,
+                        period,
+                        TraceSkipReason::BranchNotSelected,
+                    );
                     self.eval_scalar_expr(then_expr, entity_id, period)
                 } else {
+                    self.record_skipped_scalar_dependencies(
+                        then_expr,
+                        entity_id,
+                        period,
+                        TraceSkipReason::BranchNotSelected,
+                    );
                     self.eval_scalar_expr(else_expr, entity_id, period)
                 }
             }
@@ -562,6 +859,11 @@ impl<'a> Engine<'a> {
                 let target_entity_id = relation_context
                     .and_then(|context| context.entity_id_for(&derived.entity))
                     .unwrap_or(entity_id);
+                self.record_evaluated_dependency(CacheKey {
+                    derived: name.clone(),
+                    entity_id: target_entity_id.to_string(),
+                    period: period.clone(),
+                });
                 self.evaluate_judgment(name, target_entity_id, period)
             }
             JudgmentExpr::RelationMember {
@@ -591,7 +893,7 @@ impl<'a> Engine<'a> {
             }
             JudgmentExpr::And(items) => {
                 let mut saw_undetermined = false;
-                for item in items {
+                for (index, item) in items.iter().enumerate() {
                     match self.eval_judgment_expr_inner(
                         item,
                         entity_id,
@@ -599,7 +901,18 @@ impl<'a> Engine<'a> {
                         relation_context,
                     )? {
                         JudgmentOutcome::Holds => {}
-                        JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
+                        JudgmentOutcome::NotHolds => {
+                            for skipped in &items[index + 1..] {
+                                self.record_skipped_judgment_dependencies(
+                                    skipped,
+                                    entity_id,
+                                    period,
+                                    relation_context,
+                                    TraceSkipReason::ShortCircuit,
+                                );
+                            }
+                            return Ok(JudgmentOutcome::NotHolds);
+                        }
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
                     }
                 }
@@ -611,14 +924,25 @@ impl<'a> Engine<'a> {
             }
             JudgmentExpr::Or(items) => {
                 let mut saw_undetermined = false;
-                for item in items {
+                for (index, item) in items.iter().enumerate() {
                     match self.eval_judgment_expr_inner(
                         item,
                         entity_id,
                         period,
                         relation_context,
                     )? {
-                        JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
+                        JudgmentOutcome::Holds => {
+                            for skipped in &items[index + 1..] {
+                                self.record_skipped_judgment_dependencies(
+                                    skipped,
+                                    entity_id,
+                                    period,
+                                    relation_context,
+                                    TraceSkipReason::ShortCircuit,
+                                );
+                            }
+                            return Ok(JudgmentOutcome::Holds);
+                        }
                         JudgmentOutcome::NotHolds => {}
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
                     }
@@ -647,7 +971,14 @@ impl<'a> Engine<'a> {
     ) -> Result<Decimal, EvalError> {
         let scalar = match value {
             RelatedValueRef::Input(name) => self.lookup_input(name, entity_id, period)?,
-            RelatedValueRef::Derived(name) => self.evaluate_scalar(name, entity_id, period)?,
+            RelatedValueRef::Derived(name) => {
+                self.record_evaluated_dependency(CacheKey {
+                    derived: name.clone(),
+                    entity_id: entity_id.to_string(),
+                    period: period.clone(),
+                });
+                self.evaluate_scalar(name, entity_id, period)?
+            }
         };
         scalar.as_decimal().ok_or_else(|| {
             EvalError::TypeMismatch("related aggregation requires numeric values".to_string())
@@ -671,50 +1002,75 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        self.input_index
+        let mut covering = self
+            .input_index
             .get(&(name.to_string(), entity_id.to_string()))
             .into_iter()
             .flat_map(|records| records.iter().copied())
-            .find(|record| record.interval.contains_period(period))
-            .map(|record| record.value.clone())
-            .ok_or_else(|| EvalError::MissingInput {
-                name: name.to_string(),
-                entity_id: entity_id.to_string(),
-                period_start: period.start,
-                period_end: period.end,
-            })
+            .filter(|record| record.interval.contains_period(period));
+        let selected = covering.next().ok_or_else(|| EvalError::MissingInput {
+            name: name.to_string(),
+            entity_id: entity_id.to_string(),
+            period_start: period.start,
+            period_end: period.end,
+        })?;
+
+        // Records are sorted by descending start in `new`. Any immediately
+        // following covering records with the same start have equal
+        // precedence. Reject a conflicting tie rather than recovering dataset
+        // order as a hidden tie-breaker for direct Engine callers.
+        for tied in covering.take_while(|record| record.interval.start == selected.interval.start) {
+            if tied.value != selected.value {
+                return Err(EvalError::AmbiguousInput {
+                    name: name.to_string(),
+                    entity_id: entity_id.to_string(),
+                    effective_from: selected.interval.start,
+                });
+            }
+        }
+
+        Ok(selected.value.clone())
     }
 
     fn lookup_parameter(
-        &self,
+        &mut self,
         name: &str,
         key: i64,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        let parameter = self
-            .program
-            .parameters
-            .get(name)
-            .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
-        let version = parameter
-            .versions
-            .iter()
-            .filter(|version| version.applies_at(period.start))
-            .max_by_key(|version| version.effective_from)
-            .ok_or_else(|| EvalError::MissingParameterValue {
-                parameter: name.to_string(),
-                key,
-                at: period.start,
+        let (value, effective_from, effective_to) = {
+            let parameter = self
+                .program
+                .parameters
+                .get(name)
+                .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
+            let version = parameter
+                .versions
+                .iter()
+                .filter(|version| version.applies_at(period.start))
+                .max_by_key(|version| version.effective_from)
+                .ok_or_else(|| EvalError::MissingParameterValue {
+                    parameter: name.to_string(),
+                    key,
+                    at: period.start,
+                })?;
+            let value = version.values.get(&key).cloned().ok_or_else(|| {
+                EvalError::MissingParameterValue {
+                    parameter: name.to_string(),
+                    key,
+                    at: period.start,
+                }
             })?;
-        version
-            .values
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| EvalError::MissingParameterValue {
-                parameter: name.to_string(),
-                key,
-                at: period.start,
-            })
+            (value, version.effective_from, version.effective_to)
+        };
+        self.record_parameter_read(ParameterTraceRead {
+            parameter: name.to_string(),
+            index: key,
+            value: value.clone(),
+            effective_from,
+            effective_to,
+        });
+        Ok(value)
     }
 
     fn related_entity_ids(
@@ -847,6 +1203,102 @@ impl<'a> Engine<'a> {
                     ComparisonOp::Ne => left != right,
                 })
             }
+        }
+    }
+}
+
+fn collect_scalar_trace_references(
+    expr: &ScalarExpr,
+    derived: &mut Vec<String>,
+    parameters: &mut Vec<String>,
+) {
+    match expr {
+        ScalarExpr::Literal(_)
+        | ScalarExpr::Input(_)
+        | ScalarExpr::InputOrElse { .. }
+        | ScalarExpr::PeriodStart
+        | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::Derived(name) => derived.push(name.clone()),
+        ScalarExpr::ParameterLookup { parameter, index } => {
+            parameters.push(parameter.clone());
+            collect_scalar_trace_references(index, derived, parameters);
+        }
+        ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
+            for item in items {
+                collect_scalar_trace_references(item, derived, parameters);
+            }
+        }
+        ScalarExpr::Sub(left, right)
+        | ScalarExpr::Mul(left, right)
+        | ScalarExpr::Div(left, right) => {
+            collect_scalar_trace_references(left, derived, parameters);
+            collect_scalar_trace_references(right, derived, parameters);
+        }
+        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => {
+            collect_scalar_trace_references(value, derived, parameters);
+        }
+        ScalarExpr::DateAddDays { date, days } => {
+            collect_scalar_trace_references(date, derived, parameters);
+            collect_scalar_trace_references(days, derived, parameters);
+        }
+        ScalarExpr::DaysBetween { from, to } => {
+            collect_scalar_trace_references(from, derived, parameters);
+            collect_scalar_trace_references(to, derived, parameters);
+        }
+        ScalarExpr::CountRelated { where_clause, .. } => {
+            if let Some(predicate) = where_clause {
+                collect_judgment_trace_references(predicate, derived, parameters);
+            }
+        }
+        ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        } => {
+            if let RelatedValueRef::Derived(name) = value {
+                derived.push(name.clone());
+            }
+            if let Some(predicate) = where_clause {
+                collect_judgment_trace_references(predicate, derived, parameters);
+            }
+        }
+        ScalarExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_judgment_trace_references(condition, derived, parameters);
+            collect_scalar_trace_references(then_expr, derived, parameters);
+            collect_scalar_trace_references(else_expr, derived, parameters);
+        }
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            collect_scalar_trace_references(value, derived, parameters);
+            if let Some(n) = n {
+                collect_scalar_trace_references(n, derived, parameters);
+            }
+        }
+    }
+}
+
+fn collect_judgment_trace_references(
+    expr: &JudgmentExpr,
+    derived: &mut Vec<String>,
+    parameters: &mut Vec<String>,
+) {
+    match expr {
+        JudgmentExpr::Comparison { left, right, .. } => {
+            collect_scalar_trace_references(left, derived, parameters);
+            collect_scalar_trace_references(right, derived, parameters);
+        }
+        JudgmentExpr::Derived(name) => derived.push(name.clone()),
+        JudgmentExpr::RelationMember { .. } => {}
+        JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
+            for item in items {
+                collect_judgment_trace_references(item, derived, parameters);
+            }
+        }
+        JudgmentExpr::Not(item) => {
+            collect_judgment_trace_references(item, derived, parameters);
         }
     }
 }
