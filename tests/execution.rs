@@ -470,6 +470,44 @@ rules:
     }
 }
 
+#[test]
+fn single_unbounded_derived_version_does_not_apply_before_its_effective_date() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: dated_belgian_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2022-01-01
+        formula: "17"
+"#;
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
+        .expect("single-version derived RuleSpec lowers");
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        assert!(matches!(
+            integer_result(
+                &program,
+                mode.clone(),
+                2019,
+                1,
+                1,
+                "dated_belgian_amount"
+            ),
+            Err(ApiError::Eval(EvalError::MissingDerivedFormulaVersion { derived, .. }))
+                if derived == "dated_belgian_amount"
+        ));
+        assert_eq!(
+            integer_result(&program, mode, 2022, 1, 1, "dated_belgian_amount")
+                .expect("derived applies on its effective date"),
+            17
+        );
+    }
+}
+
 fn integer_result(
     program: &ProgramSpec,
     mode: ExecutionMode,

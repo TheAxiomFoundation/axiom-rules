@@ -1231,20 +1231,17 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
                 }
             };
         let semantics = lower_semantics(&last.expr, &dtype)?;
-        let versions = if v.values.len() > 1 || last.end.is_some() {
-            v.values
-                .iter()
-                .map(|value| {
-                    Ok(DerivedVersionSpec {
-                        effective_from: value.start,
-                        effective_to: value.end,
-                        semantics: lower_semantics(&value.expr, &dtype)?,
-                    })
+        let versions = v
+            .values
+            .iter()
+            .map(|value| {
+                Ok(DerivedVersionSpec {
+                    effective_from: value.start,
+                    effective_to: value.end,
+                    semantics: lower_semantics(&value.expr, &dtype)?,
                 })
-                .collect::<Result<Vec<DerivedVersionSpec>, FormulaError>>()?
-        } else {
-            Vec::new()
-        };
+            })
+            .collect::<Result<Vec<DerivedVersionSpec>, FormulaError>>()?;
         program.derived.push(DerivedSpec {
             id: None,
             name: v.path.clone(),
