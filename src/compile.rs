@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::spec::{
-    DerivedSemanticsSpec, JudgmentExprSpec, ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
+    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
+    ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +23,23 @@ pub enum CompileError {
     UnknownDerivedDependency { derived: String, dependency: String },
     #[error("duplicate derived rule `{name}`")]
     DuplicateDerivedRule { name: String },
+    #[error(
+        "{path}: duplicate parameter `{name}` ({declaration}) is rejected under strict namespace mode; merge its declarations into one parameter or rename one"
+    )]
+    DuplicateParameterDeclaration {
+        path: String,
+        name: String,
+        declaration: String,
+    },
+    #[error(
+        "{path}: duplicate parameter `{name}` ({declaration}) has conflicting declarations ({reason}); merge compatible versions into one parameter or rename one"
+    )]
+    ConflictingParameterDeclarations {
+        path: String,
+        name: String,
+        declaration: String,
+        reason: String,
+    },
     #[error("cyclic derived dependency detected involving: {cycle}")]
     CyclicDependency { cycle: String },
     #[error("unknown relation dependency `{dependency}` referenced from relation `{relation}`")]
@@ -78,6 +96,27 @@ pub enum CompileError {
 /// ignore those bounds and a v2 engine cannot guess at a v1 artifact.
 pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Escalate compatible duplicate-namespace diagnostics to compile errors.
+    /// This is deliberately narrower than issue #83's future
+    /// `--strict-resolution`, which also needs declared-input provenance.
+    pub strict_namespaces: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompileDiagnostic {
+    pub code: &'static str,
+    pub path: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for CompileDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} [{}]: {}", self.path, self.code, self.message)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramArtifact {
@@ -86,6 +125,12 @@ pub struct CompiledProgramArtifact {
     pub engine_version: Option<String>,
     pub program: ProgramSpec,
     pub metadata: CompiledProgramMetadata,
+    /// Compile-time warnings are intentionally not part of the executable
+    /// artifact contract. They are available to the invoking host and emitted
+    /// by `compile_summary_lines`, while serialized artifact bytes stay stable.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub diagnostics: Vec<CompileDiagnostic>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,22 +159,43 @@ pub struct FastPathMetadata {
 
 impl CompiledProgramArtifact {
     pub fn compile(program: ProgramSpec) -> Result<Self, CompileError> {
+        Self::compile_with_options(program, CompileOptions::default())
+    }
+
+    pub fn compile_with_options(
+        program: ProgramSpec,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        Self::compile_at(program, "<program>", options)
+    }
+
+    fn compile_at(
+        mut program: ProgramSpec,
+        path: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
+        let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
         let metadata = compiled_metadata(&program)?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             program,
             metadata,
+            diagnostics,
         })
     }
 
-    fn check_format_version(self, path: &str) -> Result<Self, CompileError> {
+    fn check_format_version(
+        mut self,
+        path: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
                 path: path.to_string(),
@@ -140,6 +206,7 @@ impl CompiledProgramArtifact {
         self.program.validate_provenance()?;
         self.program.validate_rounding()?;
         self.program.validate_effective_ranges()?;
+        self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
         // This is a derived-metadata consistency check: it proves the metadata
         // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;
@@ -153,6 +220,13 @@ impl CompiledProgramArtifact {
     }
 
     pub fn from_rulespec_str(source: &str) -> Result<Self, CompileError> {
+        Self::from_rulespec_str_with_options(source, CompileOptions::default())
+    }
+
+    pub fn from_rulespec_str_with_options(
+        source: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         if crate::rulespec::looks_like_rulespec_yaml(source) {
             let program = crate::rulespec::lower_rulespec_str(source).map_err(|error| {
                 CompileError::RuleSpec {
@@ -160,7 +234,7 @@ impl CompiledProgramArtifact {
                     error,
                 }
             })?;
-            return Self::compile(program);
+            return Self::compile_at(program, "<memory>", options);
         }
         if crate::rulespec::has_top_level_rules_key(source) {
             return Err(CompileError::AmbiguousRuleSpecYaml {
@@ -181,6 +255,14 @@ impl CompiledProgramArtifact {
         root_target: &str,
         source: &dyn crate::source::ModuleSource,
     ) -> Result<Self, CompileError> {
+        Self::from_rulespec_with_source_and_options(root_target, source, CompileOptions::default())
+    }
+
+    pub fn from_rulespec_with_source_and_options(
+        root_target: &str,
+        source: &dyn crate::source::ModuleSource,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         let program =
             crate::rulespec::load_rulespec_with_source(root_target, source).map_err(|error| {
                 CompileError::RuleSpec {
@@ -188,13 +270,22 @@ impl CompiledProgramArtifact {
                     error,
                 }
             })?;
-        Self::compile(program)
+        Self::compile_at(program, root_target, options)
     }
 
     #[cfg(feature = "fs")]
     pub fn from_rulespec_file(
         path: impl AsRef<Path>,
         roots: &crate::rulespec::CanonicalRuleSpecRoots,
+    ) -> Result<Self, CompileError> {
+        Self::from_rulespec_file_with_options(path, roots, CompileOptions::default())
+    }
+
+    #[cfg(feature = "fs")]
+    pub fn from_rulespec_file_with_options(
+        path: impl AsRef<Path>,
+        roots: &crate::rulespec::CanonicalRuleSpecRoots,
+        options: CompileOptions,
     ) -> Result<Self, CompileError> {
         let p = path.as_ref();
         let program = crate::rulespec::load_rulespec_file(p, roots).map_err(|error| {
@@ -203,7 +294,7 @@ impl CompiledProgramArtifact {
                 error,
             }
         })?;
-        Self::compile(program)
+        Self::compile_at(program, &p.display().to_string(), options)
     }
 
     /// Compile an originless RuleSpec composition emitted by `axiom-compose`.
@@ -212,6 +303,17 @@ impl CompiledProgramArtifact {
         path: impl AsRef<Path>,
         roots: &crate::rulespec::CanonicalRuleSpecRoots,
     ) -> Result<Self, CompileError> {
+        Self::from_composed_rulespec_file_with_options(path, roots, CompileOptions::default())
+    }
+
+    /// Compile an originless RuleSpec composition with explicit compatibility
+    /// options.
+    #[cfg(feature = "fs")]
+    pub fn from_composed_rulespec_file_with_options(
+        path: impl AsRef<Path>,
+        roots: &crate::rulespec::CanonicalRuleSpecRoots,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         let p = path.as_ref();
         let program = crate::rulespec::load_composed_rulespec_file(p, roots).map_err(|error| {
             CompileError::RuleSpec {
@@ -219,21 +321,36 @@ impl CompiledProgramArtifact {
                 error,
             }
         })?;
-        Self::compile(program)
+        Self::compile_at(program, &p.display().to_string(), options)
     }
 
     pub fn from_json_str(source: &str) -> Result<Self, CompileError> {
-        Self::from_json_source(source, "<memory>")
+        Self::from_json_str_with_options(source, CompileOptions::default())
+    }
+
+    pub fn from_json_str_with_options(
+        source: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        Self::from_json_source(source, "<memory>", options)
     }
 
     #[cfg(feature = "fs")]
     pub fn from_json_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
+        Self::from_json_file_with_options(path, CompileOptions::default())
+    }
+
+    #[cfg(feature = "fs")]
+    pub fn from_json_file_with_options(
+        path: impl AsRef<Path>,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         let path = path.as_ref();
         let source = fs::read_to_string(path).map_err(|error| CompileError::ReadArtifactFile {
             path: path.display().to_string(),
             error,
         })?;
-        Self::from_json_source(&source, &path.display().to_string())
+        Self::from_json_source(&source, &path.display().to_string(), options)
     }
 
     #[cfg(feature = "fs")]
@@ -246,7 +363,11 @@ impl CompiledProgramArtifact {
         })
     }
 
-    fn from_json_source(source: &str, path: &str) -> Result<Self, CompileError> {
+    fn from_json_source(
+        source: &str,
+        path: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
         let value: serde_json::Value =
             serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
@@ -270,7 +391,7 @@ impl CompiledProgramArtifact {
                 path: path.to_string(),
                 error,
             })?;
-        artifact.check_format_version(path)
+        artifact.check_format_version(path, options)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -302,6 +423,122 @@ impl CompiledProgramArtifact {
         }
         resolved
     }
+}
+
+const DUPLICATE_PARAMETER_DIAGNOSTIC: &str = "duplicate_parameter_name";
+
+fn normalize_parameter_duplicates(
+    program: &mut ProgramSpec,
+    path: &str,
+    options: CompileOptions,
+) -> Result<Vec<CompileDiagnostic>, CompileError> {
+    let mut normalized: Vec<IndexedParameterSpec> = Vec::with_capacity(program.parameters.len());
+    let mut positions = BTreeMap::<String, usize>::new();
+    let mut diagnostics = Vec::new();
+
+    for parameter in std::mem::take(&mut program.parameters) {
+        let Some(position) = positions.get(&parameter.name).copied() else {
+            positions.insert(parameter.name.clone(), normalized.len());
+            normalized.push(parameter);
+            continue;
+        };
+
+        let existing = &mut normalized[position];
+        let declaration = parameter_declaration_label(&parameter);
+        if let Some(reason) = incompatible_parameter_reason(existing, &parameter) {
+            return Err(CompileError::ConflictingParameterDeclarations {
+                path: path.to_string(),
+                name: parameter.name,
+                declaration,
+                reason,
+            });
+        }
+        if options.strict_namespaces {
+            return Err(CompileError::DuplicateParameterDeclaration {
+                path: path.to_string(),
+                name: parameter.name,
+                declaration,
+            });
+        }
+
+        diagnostics.push(CompileDiagnostic {
+            code: DUPLICATE_PARAMETER_DIAGNOSTIC,
+            path: path.to_string(),
+            message: format!(
+                "duplicate parameter `{}` declarations ({declaration}) are currently compatible and were merged; merge them into one declaration or rename one. Strict namespace mode treats this warning as an error",
+                parameter.name,
+            ),
+        });
+        existing.versions.extend(parameter.versions);
+        existing.versions.sort_by(|left, right| {
+            left.effective_from
+                .cmp(&right.effective_from)
+                .then_with(|| left.effective_to.cmp(&right.effective_to))
+        });
+        existing.versions.dedup();
+    }
+
+    program.parameters = normalized;
+    Ok(diagnostics)
+}
+
+fn parameter_declaration_label(parameter: &IndexedParameterSpec) -> String {
+    parameter.id.as_deref().map_or_else(
+        || "no retained public id".to_string(),
+        |id| format!("retained public id `{id}`"),
+    )
+}
+
+fn incompatible_parameter_reason(
+    existing: &IndexedParameterSpec,
+    duplicate: &IndexedParameterSpec,
+) -> Option<String> {
+    for (field, matches) in [
+        ("public id", existing.id == duplicate.id),
+        ("unit", existing.unit == duplicate.unit),
+        ("index slot", existing.indexed_by == duplicate.indexed_by),
+        ("source", existing.source == duplicate.source),
+        ("source URL", existing.source_url == duplicate.source_url),
+        (
+            "corpus citation path",
+            existing.corpus_citation_path == duplicate.corpus_citation_path,
+        ),
+    ] {
+        if !matches {
+            return Some(format!("declarations disagree on {field}"));
+        }
+    }
+
+    for left in &existing.versions {
+        for right in &duplicate.versions {
+            if parameter_versions_overlap(left, right) && left.values != right.values {
+                return Some(format!(
+                    "overlapping version ranges {} and {} assign different values",
+                    parameter_version_interval(left),
+                    parameter_version_interval(right)
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn parameter_versions_overlap(left: &ParameterVersionSpec, right: &ParameterVersionSpec) -> bool {
+    left.effective_to
+        .is_none_or(|end| right.effective_from <= end)
+        && right
+            .effective_to
+            .is_none_or(|end| left.effective_from <= end)
+}
+
+fn parameter_version_interval(version: &ParameterVersionSpec) -> String {
+    format!(
+        "{}..{}",
+        version.effective_from,
+        version
+            .effective_to
+            .map_or_else(|| "open".to_string(), |date| date.to_string())
+    )
 }
 
 fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, CompileError> {
@@ -1083,8 +1320,23 @@ pub fn compile_program_file_to_json(
     output_path: impl AsRef<Path>,
     roots: &crate::rulespec::CanonicalRuleSpecRoots,
 ) -> Result<CompiledProgramArtifact, CompileError> {
+    compile_program_file_to_json_with_options(
+        program_path,
+        output_path,
+        roots,
+        CompileOptions::default(),
+    )
+}
+
+#[cfg(feature = "fs")]
+pub fn compile_program_file_to_json_with_options(
+    program_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    roots: &crate::rulespec::CanonicalRuleSpecRoots,
+    options: CompileOptions,
+) -> Result<CompiledProgramArtifact, CompileError> {
     let p = program_path.as_ref();
-    let artifact = CompiledProgramArtifact::from_rulespec_file(p, roots)?;
+    let artifact = CompiledProgramArtifact::from_rulespec_file_with_options(p, roots, options)?;
     artifact.write_json_file(output_path)?;
     Ok(artifact)
 }
@@ -1095,7 +1347,26 @@ pub fn compile_composed_program_file_to_json(
     output_path: impl AsRef<Path>,
     roots: &crate::rulespec::CanonicalRuleSpecRoots,
 ) -> Result<CompiledProgramArtifact, CompileError> {
-    let artifact = CompiledProgramArtifact::from_composed_rulespec_file(program_path, roots)?;
+    compile_composed_program_file_to_json_with_options(
+        program_path,
+        output_path,
+        roots,
+        CompileOptions::default(),
+    )
+}
+
+#[cfg(feature = "fs")]
+pub fn compile_composed_program_file_to_json_with_options(
+    program_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    roots: &crate::rulespec::CanonicalRuleSpecRoots,
+    options: CompileOptions,
+) -> Result<CompiledProgramArtifact, CompileError> {
+    let artifact = CompiledProgramArtifact::from_composed_rulespec_file_with_options(
+        program_path,
+        roots,
+        options,
+    )?;
     artifact.write_json_file(output_path)?;
     Ok(artifact)
 }
@@ -1131,5 +1402,234 @@ pub fn compile_summary_lines(artifact: &CompiledProgramArtifact) -> BTreeMap<Str
             artifact.metadata.fast_path.blockers.join(" | "),
         );
     }
+    for (index, diagnostic) in artifact.diagnostics.iter().enumerate() {
+        lines.insert(format!("warning_{:03}", index + 1), diagnostic.to_string());
+    }
     lines
+}
+
+#[cfg(test)]
+mod namespace_ratchet_tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::{CompileError, CompileOptions, CompiledProgramArtifact, compile_summary_lines};
+    use crate::source::{ModuleSource, SourceError};
+    use crate::spec::ProgramSpec;
+
+    struct TestSource(BTreeMap<String, String>);
+
+    impl ModuleSource for TestSource {
+        fn load(&self, target: &str) -> Result<Option<String>, SourceError> {
+            Ok(self.0.get(target).cloned())
+        }
+    }
+
+    fn imported_duplicate_source(second_value: i64) -> TestSource {
+        let modules = [
+            (
+                "us-tn:policies/test/root",
+                r#"
+format: rulespec/v1
+imports:
+  - us-tn:policies/test/older
+  - us-tn:policies/test/newer
+rules: []
+"#
+                .to_string(),
+            ),
+            (
+                "us-tn:policies/test/older",
+                r#"
+format: rulespec/v1
+rules:
+  - name: certification_months
+    kind: parameter
+    dtype: Count
+    versions:
+      - effective_from: 2022-12-01
+        formula: "4"
+"#
+                .to_string(),
+            ),
+            (
+                "us-tn:policies/test/newer",
+                format!(
+                    r#"
+format: rulespec/v1
+rules:
+  - name: certification_months
+    kind: parameter
+    dtype: Count
+    versions:
+      - effective_from: 2023-02-15
+        formula: "{second_value}"
+"#
+                ),
+            ),
+        ]
+        .into_iter()
+        .map(|(target, text)| (target.to_string(), text))
+        .collect();
+        TestSource(modules)
+    }
+
+    fn duplicate_parameters(first_value: i64, second_value: i64) -> ProgramSpec {
+        serde_json::from_value(json!({
+            "parameters": [
+                {
+                    "id": "us-tn:policies/dhs/snap/test#certification_months",
+                    "name": "certification_months",
+                    "unit": null,
+                    "versions": [{
+                        "effective_from": "2022-12-01",
+                        "values": {"0": {"kind": "integer", "value": first_value}}
+                    }]
+                },
+                {
+                    "id": "us-tn:policies/dhs/snap/test#certification_months",
+                    "name": "certification_months",
+                    "unit": null,
+                    "versions": [{
+                        "effective_from": "2023-02-15",
+                        "values": {"0": {"kind": "integer", "value": second_value}}
+                    }]
+                }
+            ]
+        }))
+        .expect("test program spec is valid")
+    }
+
+    #[test]
+    fn compatible_duplicate_parameters_are_merged_in_default_mode() {
+        let artifact = CompiledProgramArtifact::compile(duplicate_parameters(4, 4))
+            .expect("published compatible duplicates use the default-mode ratchet");
+
+        assert_eq!(artifact.program.parameters.len(), 1);
+        assert_eq!(artifact.program.parameters[0].versions.len(), 2);
+        assert_eq!(artifact.diagnostics.len(), 1);
+        assert_eq!(artifact.diagnostics[0].code, "duplicate_parameter_name");
+        assert!(
+            artifact.diagnostics[0]
+                .message
+                .contains("merge them into one declaration or rename one")
+        );
+        assert!(
+            compile_summary_lines(&artifact)
+                .get("warning_001")
+                .is_some_and(|warning| warning.contains("<program>"))
+        );
+
+        let serialized = serde_json::to_value(&artifact).expect("artifact serializes");
+        assert!(
+            serialized.get("diagnostics").is_none(),
+            "diagnostics must not alter the executable artifact contract"
+        );
+    }
+
+    #[test]
+    fn compatible_duplicate_parameters_are_errors_in_strict_namespace_mode() {
+        let error = CompiledProgramArtifact::compile_with_options(
+            duplicate_parameters(4, 4),
+            CompileOptions {
+                strict_namespaces: true,
+            },
+        )
+        .expect_err("strict namespace mode rejects compatible duplicate declarations");
+
+        assert!(matches!(
+            error,
+            CompileError::DuplicateParameterDeclaration { ref name, .. }
+                if name == "certification_months"
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("merge its declarations into one parameter or rename one")
+        );
+    }
+
+    #[test]
+    fn conflicting_duplicate_parameters_are_errors_by_default() {
+        let error = CompiledProgramArtifact::compile(duplicate_parameters(4, 99))
+            .expect_err("conflicting values must never be resolved by shadow order");
+
+        assert!(matches!(
+            error,
+            CompileError::ConflictingParameterDeclarations { ref name, .. }
+                if name == "certification_months"
+        ));
+        assert!(error.to_string().contains("assign different values"));
+    }
+
+    #[test]
+    fn artifact_loading_applies_the_same_default_and_strict_ratchet() {
+        let artifact = CompiledProgramArtifact::compile(duplicate_parameters(4, 4))
+            .expect("default compilation normalizes duplicates");
+        let mut value = serde_json::to_value(&artifact).expect("artifact serializes");
+        let duplicate = value["program"]["parameters"][0].clone();
+        value["program"]["parameters"]
+            .as_array_mut()
+            .expect("parameters is an array")
+            .push(duplicate);
+        let source = serde_json::to_string(&value).expect("test artifact serializes");
+
+        let loaded = CompiledProgramArtifact::from_json_str(&source)
+            .expect("default artifact loading normalizes compatible duplicates");
+        assert_eq!(loaded.program.parameters.len(), 1);
+        assert_eq!(loaded.diagnostics.len(), 1);
+
+        let error = CompiledProgramArtifact::from_json_str_with_options(
+            &source,
+            CompileOptions {
+                strict_namespaces: true,
+            },
+        )
+        .expect_err("strict artifact loading rejects the duplicate");
+        assert!(matches!(
+            error,
+            CompileError::DuplicateParameterDeclaration { .. }
+        ));
+    }
+
+    #[test]
+    fn imported_rulespec_duplicates_use_the_default_and_strict_ratchet() {
+        let source = imported_duplicate_source(4);
+        let artifact =
+            CompiledProgramArtifact::from_rulespec_with_source("us-tn:policies/test/root", &source)
+                .expect("default mode merges the imported compatible declarations");
+
+        assert_eq!(artifact.program.parameters.len(), 1);
+        assert_eq!(artifact.program.parameters[0].versions.len(), 2);
+        assert_eq!(artifact.diagnostics.len(), 1);
+        assert!(
+            artifact.diagnostics[0]
+                .message
+                .contains("us-tn:policies/test/")
+        );
+
+        let strict_error = CompiledProgramArtifact::from_rulespec_with_source_and_options(
+            "us-tn:policies/test/root",
+            &source,
+            CompileOptions {
+                strict_namespaces: true,
+            },
+        )
+        .expect_err("strict namespace mode rejects the imported duplicate");
+        assert!(matches!(
+            strict_error,
+            CompileError::DuplicateParameterDeclaration { .. }
+        ));
+
+        let conflict_error = CompiledProgramArtifact::from_rulespec_with_source(
+            "us-tn:policies/test/root",
+            &imported_duplicate_source(99),
+        )
+        .expect_err("conflicting imported values fail even in default mode");
+        assert!(matches!(
+            conflict_error,
+            CompileError::ConflictingParameterDeclarations { .. }
+        ));
+    }
 }
