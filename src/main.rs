@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use axiom_rules_engine::api::{
@@ -28,13 +28,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", version_line());
                 return Ok(());
             }
+            "--help" | "-h" | "help" => {
+                println!("{TOP_USAGE}");
+                return Ok(());
+            }
             "compile" => return run_compile(args.collect(), false),
             "compile-composed" => return run_compile(args.collect(), true),
             "run-compiled" => return run_compiled(args.collect()),
             #[cfg(feature = "schema")]
             "emit-schemas" => return run_emit_schemas(args.collect()),
-            _ => return Err(format!("unknown command `{command}`").into()),
+            _ => return Err(format!("unknown command `{command}`\n\n{TOP_USAGE}").into()),
         }
+    }
+
+    // Reading a request from stdin is the documented pipeline entry point, but a person who
+    // runs the bare binary got `EOF while parsing a value at line 1 column 0`, which reads as
+    // a crash rather than as "I expected JSON on stdin". Only consume stdin when it is
+    // actually piped (#120).
+    if io::stdin().is_terminal() {
+        println!("{TOP_USAGE}");
+        return Ok(());
     }
 
     let mut input = String::new();
@@ -51,13 +64,68 @@ fn version_line() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::version_line;
+    use super::{COMPILE_USAGE, TOP_USAGE, version_line};
 
     #[test]
     fn version_line_uses_package_version() {
         assert_eq!(version_line(), "axiom-rules-engine 0.1.0");
     }
+
+    /// Top-level help must name every command `run` dispatches on, so adding a command
+    /// without documenting it fails here rather than silently leaving users without a way
+    /// to discover it (#120).
+    #[test]
+    fn top_usage_lists_every_dispatched_command() {
+        for command in [
+            "compile",
+            "compile-composed",
+            "run-compiled",
+            "emit-schemas",
+            "version",
+            "help",
+        ] {
+            assert!(
+                TOP_USAGE.contains(command),
+                "top-level usage does not mention `{command}`"
+            );
+        }
+    }
+
+    /// The two usage strings serve different levels; the top-level one must not simply be
+    /// the compile-specific text, which is what made `--help` useless before (#120).
+    #[test]
+    fn top_usage_is_distinct_from_compile_usage() {
+        assert_ne!(TOP_USAGE, COMPILE_USAGE);
+        assert!(TOP_USAGE.starts_with("axiom-rules-engine — RuleSpec compiler and runtime"));
+    }
 }
+
+const TOP_USAGE: &str = "\
+axiom-rules-engine — RuleSpec compiler and runtime
+
+usage: axiom-rules-engine <command> [options]
+       axiom-rules-engine < request.json
+
+commands:
+  compile           Compile an atomic RuleSpec module inside a canonical country
+                    checkout into a program artifact.
+  compile-composed  Compile an originless `module.kind: composition` produced by
+                    axiom-compose.
+  run-compiled      Execute a compiled artifact against a JSON request on stdin.
+  emit-schemas      Write JSON Schemas for the wire types (schema feature only).
+  version           Print the engine version.
+  help              Print this message.
+
+Run `axiom-rules-engine <command> --help` for the options of a specific command.
+
+With no command and a piped stdin, a self-contained JSON `ExecutionRequest` is read
+from stdin and its response written to stdout:
+
+  axiom-rules-engine run-compiled --artifact compiled.json < request.json
+
+Note: the released v0.1.1 binary has a different compile interface from this one —
+its `compile` takes only --program and --output, and it has no `compile-composed`.
+See docs/install.md.";
 
 const COMPILE_USAGE: &str = "\
 usage: axiom-rules-engine compile --program <absolute rules.yaml> --rulespec-root <absolute rulespec-cc> [--rulespec-root <absolute rulespec-cc>]... --output <compiled.json> [--corpus-provisions <path>]...
