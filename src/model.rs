@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
+use thiserror::Error;
 
 /// Pseudo-entity assigned to formula parameters with no declared entity.
 /// Rules at this entity are row-constant.
@@ -476,30 +477,73 @@ pub struct Program {
     pub derived: HashMap<String, Derived>,
 }
 
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("duplicate {namespace} name `{name}`")]
+pub struct NamespaceCollisionError {
+    pub namespace: &'static str,
+    pub name: String,
+}
+
+fn insert_unique<T>(
+    namespace: &'static str,
+    values: &mut HashMap<String, T>,
+    name: String,
+    value: T,
+) -> Result<(), NamespaceCollisionError> {
+    match values.entry(name.clone()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(value);
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {
+            Err(NamespaceCollisionError { namespace, name })
+        }
+    }
+}
+
 impl Program {
-    pub fn add_unit(&mut self, unit: UnitDef) {
-        self.units.insert(unit.name.clone(), unit);
+    pub fn add_unit(&mut self, unit: UnitDef) -> Result<(), NamespaceCollisionError> {
+        insert_unique("unit", &mut self.units, unit.name.clone(), unit)
     }
 
-    pub fn add_relation(&mut self, name: impl Into<String>, arity: usize) {
+    pub fn add_relation(
+        &mut self,
+        name: impl Into<String>,
+        arity: usize,
+    ) -> Result<(), NamespaceCollisionError> {
         self.add_relation_schema(RelationSchema {
             name: name.into(),
             arity,
             derivation: None,
-        });
+        })
     }
 
-    pub fn add_relation_schema(&mut self, schema: RelationSchema) {
-        let name = schema.name.clone();
-        self.relations.insert(name, schema);
+    pub fn add_relation_schema(
+        &mut self,
+        schema: RelationSchema,
+    ) -> Result<(), NamespaceCollisionError> {
+        insert_unique("relation", &mut self.relations, schema.name.clone(), schema)
     }
 
-    pub fn add_parameter(&mut self, parameter: IndexedParameter) {
-        self.parameters.insert(parameter.name.clone(), parameter);
+    pub fn add_parameter(
+        &mut self,
+        parameter: IndexedParameter,
+    ) -> Result<(), NamespaceCollisionError> {
+        insert_unique(
+            "parameter",
+            &mut self.parameters,
+            parameter.name.clone(),
+            parameter,
+        )
     }
 
-    pub fn add_derived(&mut self, derived: Derived) {
-        self.derived.insert(derived.name.clone(), derived);
+    pub fn add_derived(&mut self, derived: Derived) -> Result<(), NamespaceCollisionError> {
+        insert_unique(
+            "derived rule",
+            &mut self.derived,
+            derived.name.clone(),
+            derived,
+        )
     }
 
     /// `minor_units` of a declared currency unit by name, or `None` if the unit

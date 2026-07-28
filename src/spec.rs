@@ -15,6 +15,8 @@ use crate::model::{
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error(transparent)]
+    NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
     InvalidDecimal { literal: String },
     #[error("{location} declares non-canonical corpus_citation_path `{value}`")]
@@ -124,17 +126,10 @@ impl ProgramSpec {
     pub fn validate_rounding(&self) -> Result<(), SpecError> {
         // A lightweight units view; the full `to_program` also does this, but
         // this stays cheap and independent of relation/derived-graph checks.
-        let program = Program {
-            units: self
-                .units
-                .iter()
-                .map(|unit| {
-                    let unit = unit.to_model();
-                    (unit.name.clone(), unit)
-                })
-                .collect(),
-            ..Program::default()
-        };
+        let mut program = Program::default();
+        for unit in &self.units {
+            program.add_unit(unit.to_model())?;
+        }
         for derived in &self.derived {
             derived.resolve_rounding(&program)?;
         }
@@ -170,15 +165,15 @@ impl ProgramSpec {
         let mut program = Program::default();
 
         for unit in &self.units {
-            program.add_unit(unit.to_model());
+            program.add_unit(unit.to_model())?;
         }
 
         for relation in &self.relations {
-            program.add_relation_schema(relation.to_model()?);
+            program.add_relation_schema(relation.to_model()?)?;
         }
 
         for parameter in &self.parameters {
-            program.add_parameter(parameter.to_model()?);
+            program.add_parameter(parameter.to_model()?)?;
         }
 
         // Units are already in `program`, so a derived rule's `rounding:` mode
@@ -189,7 +184,7 @@ impl ProgramSpec {
         for derived in &self.derived {
             let mut model = derived.to_model()?;
             model.rounding = derived.resolve_rounding(&program)?;
-            program.add_derived(model);
+            program.add_derived(model)?;
         }
 
         Ok(program)
@@ -1223,5 +1218,77 @@ impl RelationRecordSpec {
             tuple: self.tuple.clone(),
             interval: self.interval.to_model(),
         })
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use serde_json::json;
+
+    use super::{ProgramSpec, SpecError};
+
+    fn program_with(field: &str, declarations: serde_json::Value) -> ProgramSpec {
+        let mut value = json!({});
+        value[field] = declarations;
+        serde_json::from_value(value).expect("test program spec is valid")
+    }
+
+    fn assert_collision(spec: ProgramSpec, namespace: &'static str, name: &str) {
+        let error = spec
+            .to_program()
+            .expect_err("a duplicate declaration must not silently shadow");
+        match error {
+            SpecError::NamespaceCollision(error) => {
+                assert_eq!(error.namespace, namespace);
+                assert_eq!(error.name, name);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn to_program_rejects_duplicate_unit_names() {
+        let unit = json!({"name": "USD", "kind": "currency", "minor_units": 2});
+        let spec = program_with("units", json!([unit.clone(), unit]));
+
+        assert_collision(spec, "unit", "USD");
+    }
+
+    #[test]
+    fn to_program_rejects_duplicate_relation_names() {
+        let relation = json!({"name": "member_of_household", "arity": 2});
+        let spec = program_with("relations", json!([relation.clone(), relation]));
+
+        assert_collision(spec, "relation", "member_of_household");
+    }
+
+    #[test]
+    fn to_program_rejects_duplicate_parameter_names() {
+        let parameter = json!({
+            "name": "certification_months",
+            "unit": null,
+            "versions": []
+        });
+        let spec = program_with("parameters", json!([parameter.clone(), parameter]));
+
+        assert_collision(spec, "parameter", "certification_months");
+    }
+
+    #[test]
+    fn to_program_rejects_duplicate_derived_names() {
+        let derived = json!({
+            "name": "benefit",
+            "entity": "Household",
+            "dtype": "integer",
+            "unit": null,
+            "semantics": "scalar",
+            "expr": {
+                "kind": "literal",
+                "value": {"kind": "integer", "value": 1}
+            }
+        });
+        let spec = program_with("derived", json!([derived.clone(), derived]));
+
+        assert_collision(spec, "derived rule", "benefit");
     }
 }
