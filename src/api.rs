@@ -178,6 +178,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
     let dataset = request.dataset.to_dataset_for_program(&program)?;
+    crate::engine::validate_input_spells(&dataset)?;
 
     match requested_mode {
         ExecutionMode::Explain => execute_explain(
@@ -191,7 +192,27 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             },
         ),
         ExecutionMode::Fast => {
-            match crate::bulk::try_execute(&program, &dataset, &request.queries)? {
+            // Fast accepts one shared query period. Resolve every covering
+            // input once under the same latest-start rule used by Explain
+            // before handing the dataset to the order-overwriting bulk
+            // evaluator. If periods differ, leave the full dataset intact:
+            // bulk will report Unsupported and the ordinary Explain path will
+            // select independently for each query period.
+            let resolved_dataset;
+            let fast_dataset = if let Some(first_query) = request.queries.first()
+                && request
+                    .queries
+                    .iter()
+                    .all(|query| query.period == first_query.period)
+            {
+                let period = first_query.period.to_model()?;
+                resolved_dataset = crate::engine::resolve_inputs_for_period(&dataset, &period);
+                &resolved_dataset
+            } else {
+                &dataset
+            };
+
+            match crate::bulk::try_execute(&program, fast_dataset, &request.queries)? {
                 crate::bulk::FastPathResult::Executed(response) => {
                     Ok(response.with_metadata(ExecutionMetadata {
                         requested_mode: ExecutionMode::Fast,
@@ -201,7 +222,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                 }
                 crate::bulk::FastPathResult::Unsupported { reason } => execute_explain(
                     &program,
-                    &dataset,
+                    fast_dataset,
                     request.queries,
                     ExecutionMetadata {
                         requested_mode: ExecutionMode::Fast,

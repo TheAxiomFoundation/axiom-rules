@@ -89,59 +89,301 @@ fn cli_round_trip_returns_json() {
 }
 
 #[test]
-fn fast_mode_matches_explain_mode_on_batch() {
-    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
-        .expect("program fixture parses");
+fn explain_and_fast_are_differentially_equivalent_on_generated_programs() {
+    // Deterministic property-style coverage without a random dependency. Each
+    // seed varies the arithmetic program, the two overlapping input values,
+    // and their dataset order. The newer spell must win in both modes.
+    for seed in 0_u64..128 {
+        let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let operation = next() % 4;
+        let literal = i64::try_from(next() % 9 + 1).expect("small generated literal");
+        let newer_value = i64::try_from(next() % 2_000 + 1).expect("small generated value");
+        let older_value =
+            newer_value + i64::try_from(next() % 2_000 + 1).expect("small generated delta");
+        let newer_first = next() % 2 == 0;
+
+        let expression = match operation {
+            0 => ScalarExprSpec::Add {
+                items: vec![
+                    ScalarExprSpec::Input {
+                        name: "amount".to_string(),
+                    },
+                    decimal_literal(literal),
+                ],
+            },
+            1 => ScalarExprSpec::Sub {
+                left: Box::new(ScalarExprSpec::Input {
+                    name: "amount".to_string(),
+                }),
+                right: Box::new(decimal_literal(literal)),
+            },
+            2 => ScalarExprSpec::Mul {
+                left: Box::new(ScalarExprSpec::Input {
+                    name: "amount".to_string(),
+                }),
+                right: Box::new(decimal_literal(literal)),
+            },
+            _ => ScalarExprSpec::Div {
+                left: Box::new(ScalarExprSpec::Input {
+                    name: "amount".to_string(),
+                }),
+                right: Box::new(decimal_literal(literal)),
+            },
+        };
+        let (program, dataset, query) =
+            generated_overlap_case(expression, newer_value, older_value, newer_first);
+
+        let explain = execute_request(ExecutionRequest {
+            mode: ExecutionMode::Explain,
+            program: program.clone(),
+            dataset: dataset.clone(),
+            queries: vec![query.clone()],
+        })
+        .expect("generated Explain request succeeds");
+        let fast = execute_request(ExecutionRequest {
+            mode: ExecutionMode::Fast,
+            program,
+            dataset,
+            queries: vec![query],
+        })
+        .expect("generated Fast request succeeds");
+
+        assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
+        assert_eq!(
+            fast.metadata.actual_mode,
+            ExecutionMode::Fast,
+            "seed {seed} unexpectedly fell back: {:?}",
+            fast.metadata.fallback_reason
+        );
+        assert_eq!(
+            serde_json::to_value(&explain.results[0].outputs).expect("Explain outputs serialise"),
+            serde_json::to_value(&fast.results[0].outputs).expect("Fast outputs serialise"),
+            "execution modes diverged for generated seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn overlapping_covering_inputs_use_latest_start_in_every_mode_and_order() {
+    let expression = ScalarExprSpec::If {
+        condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+            left: Box::new(ScalarExprSpec::Input {
+                name: "amount".to_string(),
+            }),
+            op: ComparisonOpSpec::Gt,
+            right: Box::new(decimal_literal(3_000)),
+        }),
+        then_expr: Box::new(decimal_literal(0)),
+        else_expr: Box::new(decimal_literal(650)),
+    };
+
+    for newer_first in [true, false] {
+        let (program, dataset, query) =
+            generated_overlap_case(expression.clone(), 2_000, 4_000, newer_first);
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let response = execute_request(ExecutionRequest {
+                mode: mode.clone(),
+                program: program.clone(),
+                dataset: dataset.clone(),
+                queries: vec![query.clone()],
+            })
+            .expect("overlapping-input request succeeds");
+
+            assert_eq!(response.metadata.actual_mode, mode);
+            assert_eq!(
+                decimal_output(
+                    response.results[0]
+                        .outputs
+                        .get("benefit")
+                        .expect("benefit output")
+                ),
+                decimal("650"),
+                "latest-start input did not win with newer_first={newer_first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn equal_start_conflicting_inputs_are_ambiguous_in_every_mode_and_order() {
+    let expression = ScalarExprSpec::Input {
+        name: "amount".to_string(),
+    };
+
+    for newer_first in [true, false] {
+        let (program, mut dataset, query) =
+            generated_overlap_case(expression.clone(), 2_000, 4_000, newer_first);
+        // Give both conflicting records equal precedence while leaving their
+        // ends different. Dataset order and interval length are not authority
+        // to choose one asserted fact over another.
+        dataset.inputs[0].interval.start =
+            chrono::NaiveDate::from_ymd_opt(2025, 7, 1).expect("valid date");
+        dataset.inputs[1].interval.start =
+            chrono::NaiveDate::from_ymd_opt(2025, 7, 1).expect("valid date");
+        dataset.inputs[0].interval.end =
+            chrono::NaiveDate::from_ymd_opt(2027, 12, 31).expect("valid date");
+
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let error = execute_request(ExecutionRequest {
+                mode,
+                program: program.clone(),
+                dataset: dataset.clone(),
+                queries: vec![query.clone()],
+            })
+            .expect_err("equal-precedence conflicting facts must be rejected");
+
+            assert!(
+                matches!(
+                    error,
+                    ApiError::Eval(EvalError::AmbiguousInput {
+                        ref name,
+                        ref entity_id,
+                        effective_from,
+                    }) if name == "amount"
+                        && entity_id == "household-1"
+                        && effective_from
+                            == chrono::NaiveDate::from_ymd_opt(2025, 7, 1)
+                                .expect("valid date")
+                ),
+                "unexpected ambiguity error: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn newer_non_covering_input_does_not_displace_older_covering_input() {
+    let expression = ScalarExprSpec::Input {
+        name: "amount".to_string(),
+    };
+    let (program, mut dataset, query) = generated_overlap_case(expression, 2_000, 4_000, true);
+    dataset.inputs[0].interval.start =
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 15).expect("valid date");
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: dataset.clone(),
+            queries: vec![query.clone()],
+        })
+        .expect("request with a non-covering newer spell succeeds");
+
+        assert_eq!(response.metadata.actual_mode, mode);
+        assert_eq!(
+            decimal_output(
+                response.results[0]
+                    .outputs
+                    .get("benefit")
+                    .expect("benefit output")
+            ),
+            decimal("4000")
+        );
+    }
+}
+
+#[test]
+fn related_inputs_use_latest_covering_start_in_every_mode_and_order() {
     let period = simple_period();
-    let queries = simple_queries(&period);
-    let dataset = simple_dataset(&period);
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            derivation: None,
+        }],
+        derived: vec![DerivedSpec {
+            id: None,
+            name: "household_amount".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Decimal,
+            unit: None,
+            rounding: None,
+            source: None,
+            period: None,
+            source_url: None,
+            corpus_citation_path: None,
+            semantics: DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::SumRelated {
+                    relation: "member_of_household".to_string(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input {
+                        name: "amount".to_string(),
+                    },
+                    where_clause: None,
+                },
+            },
+            versions: vec![],
+        }],
+        ..ProgramSpec::default()
+    };
+    let newer = InputRecordSpec {
+        name: "amount".to_string(),
+        entity: "Person".to_string(),
+        entity_id: "person-1".to_string(),
+        interval: IntervalSpec {
+            start: chrono::NaiveDate::from_ymd_opt(2025, 7, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).expect("valid date"),
+        },
+        value: decimal_value("2000"),
+    };
+    let older = InputRecordSpec {
+        name: "amount".to_string(),
+        entity: "Person".to_string(),
+        entity_id: "person-1".to_string(),
+        interval: IntervalSpec {
+            start: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).expect("valid date"),
+        },
+        value: decimal_value("4000"),
+    };
+    let relation = RelationRecordSpec {
+        name: "member_of_household".to_string(),
+        tuple: vec!["person-1".to_string(), "household-1".to_string()],
+        interval: IntervalSpec {
+            start: period.start,
+            end: period.end,
+        },
+    };
+    let query = ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec!["household_amount".to_string()],
+    };
 
-    let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Fast,
-        program: program.clone(),
-        dataset: dataset.clone(),
-        queries: queries.clone(),
-    })
-    .expect("explain request succeeds");
+    for inputs in [vec![newer.clone(), older.clone()], vec![older, newer]] {
+        let dataset = DatasetSpec {
+            inputs,
+            relations: vec![relation.clone()],
+        };
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let response = execute_request(ExecutionRequest {
+                mode: mode.clone(),
+                program: program.clone(),
+                dataset: dataset.clone(),
+                queries: vec![query.clone()],
+            })
+            .expect("related-input request succeeds");
 
-    let fast = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Fast,
-        program,
-        dataset,
-        queries,
-    })
-    .expect("fast request succeeds");
-
-    assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
-    assert_eq!(fast.metadata.fallback_reason, None);
-    // fast mode emits no trace; compare only primary outputs here.
-    let explain_outputs: Vec<_> = explain
-        .results
-        .iter()
-        .map(|result| {
-            (
-                result.entity_id.clone(),
-                result.period.clone(),
-                result.outputs.clone(),
-            )
-        })
-        .collect();
-    let fast_outputs: Vec<_> = fast
-        .results
-        .iter()
-        .map(|result| {
-            (
-                result.entity_id.clone(),
-                result.period.clone(),
-                result.outputs.clone(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        serde_json::to_value(&explain_outputs).expect("explain outputs serialise"),
-        serde_json::to_value(&fast_outputs).expect("fast outputs serialise")
-    );
+            assert_eq!(response.metadata.actual_mode, mode);
+            assert_eq!(
+                decimal_output(
+                    response.results[0]
+                        .outputs
+                        .get("household_amount")
+                        .expect("household amount output")
+                ),
+                decimal("2000")
+            );
+        }
+    }
 }
 
 #[test]
@@ -1745,6 +1987,78 @@ fn simple_execution_request(mode: ExecutionMode, program: ProgramSpec) -> Execut
         program,
         dataset: simple_dataset(&period),
         queries: simple_queries(&period),
+    }
+}
+
+fn generated_overlap_case(
+    expression: ScalarExprSpec,
+    newer_value: i64,
+    older_value: i64,
+    newer_first: bool,
+) -> (ProgramSpec, DatasetSpec, ExecutionQuery) {
+    let period = simple_period();
+    let newer = InputRecordSpec {
+        name: "amount".to_string(),
+        entity: "Household".to_string(),
+        entity_id: "household-1".to_string(),
+        interval: IntervalSpec {
+            start: chrono::NaiveDate::from_ymd_opt(2025, 7, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).expect("valid date"),
+        },
+        value: decimal_value(&newer_value.to_string()),
+    };
+    let older = InputRecordSpec {
+        name: "amount".to_string(),
+        entity: "Household".to_string(),
+        entity_id: "household-1".to_string(),
+        interval: IntervalSpec {
+            start: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).expect("valid date"),
+        },
+        value: decimal_value(&older_value.to_string()),
+    };
+    let inputs = if newer_first {
+        vec![newer, older]
+    } else {
+        vec![older, newer]
+    };
+    let program = ProgramSpec {
+        derived: vec![DerivedSpec {
+            id: None,
+            name: "benefit".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Decimal,
+            unit: None,
+            rounding: None,
+            source: None,
+            period: None,
+            source_url: None,
+            corpus_citation_path: None,
+            semantics: DerivedSemanticsSpec::Scalar { expr: expression },
+            versions: vec![],
+        }],
+        ..ProgramSpec::default()
+    };
+    let query = ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec!["benefit".to_string()],
+    };
+
+    (
+        program,
+        DatasetSpec {
+            inputs,
+            relations: vec![],
+        },
+        query,
+    )
+}
+
+fn decimal_literal(value: i64) -> ScalarExprSpec {
+    ScalarExprSpec::Literal {
+        value: decimal_value(&value.to_string()),
     }
 }
 

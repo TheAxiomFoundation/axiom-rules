@@ -23,6 +23,14 @@ pub enum EvalError {
         period_start: chrono::NaiveDate,
         period_end: chrono::NaiveDate,
     },
+    #[error(
+        "ambiguous input `{name}` for entity `{entity_id}`: records effective from {effective_from} have conflicting values; merge or split the spells so one value applies at each start date"
+    )]
+    AmbiguousInput {
+        name: String,
+        entity_id: String,
+        effective_from: chrono::NaiveDate,
+    },
     #[error("unit `{0}` was not declared")]
     UnknownUnit(String),
     #[error("type mismatch: {0}")]
@@ -107,6 +115,69 @@ pub enum EvalError {
         second_period: String,
         second_value: String,
     },
+}
+
+/// Validate the one unresolvable tie in the input-spell precedence contract.
+///
+/// Covering records are resolved by latest `interval.start`. Two values for the
+/// same canonical fact, entity, and start date have equal precedence, so
+/// choosing either would reintroduce dataset-order semantics. Equal duplicates
+/// are harmless; conflicting values are rejected before either execution mode
+/// runs.
+pub(crate) fn validate_input_spells(data: &DataSet) -> Result<(), EvalError> {
+    let mut values_by_start: HashMap<(&str, &str, chrono::NaiveDate), &ScalarValue> =
+        HashMap::new();
+    for record in &data.inputs {
+        let key = (
+            record.name.as_str(),
+            record.entity_id.as_str(),
+            record.interval.start,
+        );
+        if let Some(existing) = values_by_start.get(&key) {
+            if *existing != &record.value {
+                return Err(EvalError::AmbiguousInput {
+                    name: record.name.clone(),
+                    entity_id: record.entity_id.clone(),
+                    effective_from: record.interval.start,
+                });
+            }
+        } else {
+            values_by_start.insert(key, &record.value);
+        }
+    }
+    Ok(())
+}
+
+/// Build the order-independent, single-period input view consumed by Fast.
+///
+/// Bulk execution handles one shared query period and otherwise falls back to
+/// Explain. Resolve every fact (including facts on related entities) once in a
+/// single O(N) pass so the bulk evaluator cannot overwrite a newer covering
+/// spell with an older record that happens to appear later in the dataset.
+pub(crate) fn resolve_inputs_for_period(data: &DataSet, period: &Period) -> DataSet {
+    let mut selected_by_fact: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut inputs = Vec::new();
+
+    for record in &data.inputs {
+        if !record.interval.contains_period(period) {
+            continue;
+        }
+        let key = (record.name.as_str(), record.entity_id.as_str());
+        if let Some(&selected_index) = selected_by_fact.get(&key) {
+            let selected: &crate::model::InputRecord = &inputs[selected_index];
+            if record.interval.start > selected.interval.start {
+                inputs[selected_index] = record.clone();
+            }
+        } else {
+            selected_by_fact.insert(key, inputs.len());
+            inputs.push(record.clone());
+        }
+    }
+
+    DataSet {
+        inputs,
+        relations: data.relations.clone(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -671,18 +742,34 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        self.input_index
+        let mut covering = self
+            .input_index
             .get(&(name.to_string(), entity_id.to_string()))
             .into_iter()
             .flat_map(|records| records.iter().copied())
-            .find(|record| record.interval.contains_period(period))
-            .map(|record| record.value.clone())
-            .ok_or_else(|| EvalError::MissingInput {
-                name: name.to_string(),
-                entity_id: entity_id.to_string(),
-                period_start: period.start,
-                period_end: period.end,
-            })
+            .filter(|record| record.interval.contains_period(period));
+        let selected = covering.next().ok_or_else(|| EvalError::MissingInput {
+            name: name.to_string(),
+            entity_id: entity_id.to_string(),
+            period_start: period.start,
+            period_end: period.end,
+        })?;
+
+        // Records are sorted by descending start in `new`. Any immediately
+        // following covering records with the same start have equal
+        // precedence. Reject a conflicting tie rather than recovering dataset
+        // order as a hidden tie-breaker for direct Engine callers.
+        for tied in covering.take_while(|record| record.interval.start == selected.interval.start) {
+            if tied.value != selected.value {
+                return Err(EvalError::AmbiguousInput {
+                    name: name.to_string(),
+                    entity_id: entity_id.to_string(),
+                    effective_from: selected.interval.start,
+                });
+            }
+        }
+
+        Ok(selected.value.clone())
     }
 
     fn lookup_parameter(
