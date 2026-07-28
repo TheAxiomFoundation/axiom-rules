@@ -2476,6 +2476,35 @@ rules: []
 }
 
 #[test]
+fn rulespec_rejects_default_instead_of_discarding_it() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: amount_with_fallback
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    default: 17
+    versions:
+      - effective_from: 2026-01-01
+        formula: optional_amount
+"#;
+
+    let error =
+        lower_rulespec_str(rulespec).expect_err("an unsupported default must not be discarded");
+    assert!(matches!(
+        &error,
+        RuleSpecError::UnsupportedDefault { path, name }
+            if path == "<memory>" && name == "amount_with_fallback"
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("express the fallback explicitly in the formula")
+    );
+}
+
+#[test]
 fn non_exhaustive_match_warns_by_default_and_errors_in_strict_mode() {
     let rulespec = r#"
 format: rulespec/v1

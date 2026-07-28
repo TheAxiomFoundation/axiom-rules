@@ -1110,6 +1110,16 @@ pub fn parse_source(src: &str) -> Result<Module, FormulaError> {
 ///   lower to derived outputs attached to a synthetic `Scalar` entity so
 ///   they can be referenced from entity-scoped derived values.
 pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
+    if let Some(variable) = module
+        .variables
+        .iter()
+        .find(|variable| variable.default.is_some())
+    {
+        return Err(FormulaError::lower(format!(
+            "variable `{}` declares unsupported `default`; write an explicit formula fallback",
+            variable.path
+        )));
+    }
     let mut program = ProgramSpec::default();
 
     // Helpful unit defaults so RuleSpec modules don't have to re-declare common

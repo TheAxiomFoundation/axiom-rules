@@ -88,6 +88,10 @@ pub enum RuleSpecError {
         "RuleSpec rule `{name}` declares `rounding` but has kind `{kind}`; output rounding applies only to `derived` currency rules"
     )]
     RoundingOnNonDerivedRule { name: String, kind: String },
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` declares unsupported `default`; rule-level defaults have no defined semantics, so remove it and express the fallback explicitly in the formula"
+    )]
+    UnsupportedDefault { path: String, name: String },
     #[error("RuleSpec rule `{name}` has no formula version")]
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
@@ -1917,6 +1921,7 @@ impl RulesDocument {
                 Err(error) => return Err(error),
             };
             rule.validate_version_ranges()?;
+            rule.reject_unsupported_default()?;
             // Rounding is an output-rule concern; reject it on any non-derived
             // kind up front (a parameter/relation with `rounding:` would
             // otherwise be silently dropped by the name-match that attaches it).
@@ -2212,6 +2217,16 @@ impl RuleDefinition {
         Ok(())
     }
 
+    fn reject_unsupported_default(&self) -> Result<(), RuleSpecError> {
+        if self.default.is_some() {
+            return Err(RuleSpecError::UnsupportedDefault {
+                path: self.source_path(),
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn is_parameter_table(&self) -> bool {
         self.versions
             .iter()
@@ -2499,7 +2514,6 @@ impl RuleDefinition {
         write_metadata(out, "unit", self.unit.as_deref());
         write_metadata(out, "label", self.label.as_deref());
         write_metadata(out, "description", self.description.as_deref());
-        write_metadata(out, "default", self.default.as_deref());
         write_metadata(out, "indexed_by", self.indexed_by.as_deref());
         write_metadata(out, "status", self.status.as_deref());
         let (source, source_url) = self.effective_source();
