@@ -2291,6 +2291,132 @@ rules:
 }
 
 #[test]
+fn rulespec_rejects_duplicate_version_starts_in_either_order_and_on_table_parameters() {
+    for (first, second) in [("10", "20"), ("20", "10")] {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: ambiguous_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "{first}"
+      - effective_from: 2026-01-01
+        formula: "{second}"
+"#
+        );
+        let error = lower_rulespec_str(&rulespec)
+            .expect_err("equal-start derived versions must be rejected");
+        assert!(matches!(
+            error,
+            RuleSpecError::DuplicateEffectiveFrom {
+                name,
+                effective_from,
+                ..
+            } if name == "ambiguous_amount"
+                && effective_from
+                    == chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+        ));
+    }
+
+    let table = r#"
+format: rulespec/v1
+rules:
+  - name: ambiguous_table
+    kind: parameter
+    dtype: Integer
+    indexed_by: household_size
+    versions:
+      - effective_from: 2026-01-01
+        values:
+          1: 10
+      - effective_from: 2026-01-01
+        values:
+          1: 20
+"#;
+    assert!(matches!(
+        lower_rulespec_str(table),
+        Err(RuleSpecError::DuplicateEffectiveFrom { name, .. })
+            if name == "ambiguous_table"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_explicit_inclusive_version_overlap_in_either_order() {
+    let versions = [
+        r#"
+      - effective_from: 2025-01-01
+        effective_to: 2026-01-01
+        formula: "10"
+      - effective_from: 2026-01-01
+        formula: "20""#,
+        r#"
+      - effective_from: 2026-01-01
+        formula: "20"
+      - effective_from: 2025-01-01
+        effective_to: 2026-01-01
+        formula: "10""#,
+    ];
+    for versions in versions {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: overlapping_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:{versions}
+"#
+        );
+        let error = lower_rulespec_str(&rulespec).expect_err("inclusive overlap must be rejected");
+        assert!(matches!(
+            error,
+            RuleSpecError::OverlappingVersionRanges {
+                name,
+                first_from,
+                first_to,
+                second_from,
+                ..
+            } if name == "overlapping_amount"
+                && first_from
+                    == chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date")
+                && first_to
+                    == chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+                && second_from == first_to
+        ));
+    }
+}
+
+#[test]
+fn rulespec_allows_later_versions_to_supersede_open_ended_versions() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: superseded_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+      - effective_from: 2026-01-01
+        formula: "20"
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("later start supersedes earlier version");
+    let derived = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "superseded_amount")
+        .expect("derived output present");
+    assert_eq!(derived.versions.len(), 2);
+}
+
+#[test]
 fn non_exhaustive_match_warns_by_default_and_errors_in_strict_mode() {
     let rulespec = r#"
 format: rulespec/v1

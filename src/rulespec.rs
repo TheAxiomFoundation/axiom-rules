@@ -92,6 +92,24 @@ pub enum RuleSpecError {
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
     MissingEffectiveFrom { name: String },
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` declares more than one version effective from {effective_from}; give every version a unique effective_from"
+    )]
+    DuplicateEffectiveFrom {
+        path: String,
+        name: String,
+        effective_from: NaiveDate,
+    },
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` has overlapping explicit version ranges: {first_from}..{first_to} overlaps the version starting {second_from}; end the first version before {second_from}"
+    )]
+    OverlappingVersionRanges {
+        path: String,
+        name: String,
+        first_from: NaiveDate,
+        first_to: NaiveDate,
+        second_from: NaiveDate,
+    },
     #[error("RuleSpec parameter table `{name}` has values but no indexed_by")]
     MissingIndexedBy { name: String },
     #[error(
@@ -1889,6 +1907,7 @@ impl RulesDocument {
                 }
                 Err(error) => return Err(error),
             };
+            rule.validate_version_ranges()?;
             // Rounding is an output-rule concern; reject it on any non-derived
             // kind up front (a parameter/relation with `rounding:` would
             // otherwise be silently dropped by the name-match that attaches it).
@@ -2076,6 +2095,12 @@ impl RulesDocument {
 }
 
 impl RuleDefinition {
+    fn source_path(&self) -> String {
+        self.origin_target
+            .clone()
+            .unwrap_or_else(|| "<memory>".to_string())
+    }
+
     fn canonical_rule_id(&self) -> Option<String> {
         self.origin_target
             .as_ref()
@@ -2119,6 +2144,46 @@ impl RuleDefinition {
             }];
         }
         Vec::new()
+    }
+
+    fn validate_version_ranges(&self) -> Result<(), RuleSpecError> {
+        let mut ranges = self
+            .effective_versions()
+            .into_iter()
+            .filter_map(|version| {
+                version
+                    .effective_from
+                    .map(|effective_from| (effective_from, version.effective_to))
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|(effective_from, _)| *effective_from);
+
+        for window in ranges.windows(2) {
+            let (first_from, first_to) = window[0];
+            let (second_from, _) = window[1];
+            if first_from == second_from {
+                return Err(RuleSpecError::DuplicateEffectiveFrom {
+                    path: self.source_path(),
+                    name: self.name.clone(),
+                    effective_from: first_from,
+                });
+            }
+            // An absent upper bound is intentionally superseded by the next
+            // later-starting version. Only an explicit inclusive upper bound
+            // can contradict the next version's commencement.
+            if let Some(first_to) = first_to
+                && first_to >= second_from
+            {
+                return Err(RuleSpecError::OverlappingVersionRanges {
+                    path: self.source_path(),
+                    name: self.name.clone(),
+                    first_from,
+                    first_to,
+                    second_from,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn is_parameter_table(&self) -> bool {
