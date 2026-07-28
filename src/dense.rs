@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use thiserror::Error;
@@ -511,6 +512,11 @@ struct CompiledDerived {
     /// Applied to the whole evaluated column before it is cached, so dependents
     /// and direct outputs observe the same rounded values as the other paths.
     rounding: Option<Rounding>,
+    /// Commencement date of the single unbounded version this was compiled from,
+    /// when the source rule was versioned. Dense compiles once and executes for
+    /// many periods, so the date cannot be resolved at compile time; it is
+    /// enforced per execution instead. `None` for unversioned rules.
+    effective_from: Option<NaiveDate>,
 }
 
 #[derive(Clone, Debug)]
@@ -628,12 +634,31 @@ impl DenseCompiledProgram {
         self.execute_with::<f64>(period, batch, outputs)
     }
 
+    /// Every rule in a dense plan is reachable from the compiled roots, so a plan executed
+    /// before any of their commencement dates has no lawful answer. The generic executor
+    /// reports that per rule as `MissingDerivedFormulaVersion`; report it identically here
+    /// rather than computing a pre-commencement number (#84).
+    fn check_commencement(&self, period: &Period) -> Result<(), EvalError> {
+        for derived in &self.derived {
+            if let Some(effective_from) = derived.effective_from
+                && period.start < effective_from
+            {
+                return Err(EvalError::MissingDerivedFormulaVersion {
+                    derived: derived.name.clone(),
+                    at: period.start,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn execute_with<N: DenseNum>(
         &self,
         period: &Period,
         batch: DenseBatchSpec,
         outputs: &[String],
     ) -> Result<DenseExecutionResult, EvalError> {
+        self.check_commencement(period)?;
         let batch = self.bind_batch(batch)?;
         let mut executor: DenseExecutor<'_, N> = DenseExecutor::new(self, period, batch);
         let mut result = HashMap::new();
@@ -1067,11 +1092,21 @@ impl<'a> DenseCompiler<'a> {
             self.program.derived.get(name).ok_or_else(|| {
                 DenseCompileError::Unsupported(format!("unknown derived `{name}`"))
             })?;
-        if !derived.versions.is_empty() {
-            return Err(DenseCompileError::Unsupported(format!(
-                "versioned derived formulas in `{name}`; use generic API execution"
-            )));
-        }
+        // Since #84 stopped discarding commencement dates, every declared derived rule carries
+        // at least one version, so rejecting all versioned rules here would reject the whole
+        // corpus. The single unbounded version — the shape #84 restored — is compiled directly
+        // and its commencement enforced at execution time. Genuinely multi-version or
+        // end-bounded rules still need per-period selection the dense plan cannot express, and
+        // are still routed to the generic API.
+        let versioned_semantics = match derived.versions.as_slice() {
+            [] => None,
+            [only] if only.effective_to.is_none() => Some((&only.semantics, only.effective_from)),
+            _ => {
+                return Err(DenseCompileError::Unsupported(format!(
+                    "versioned derived formulas in `{name}`; use generic API execution"
+                )));
+            }
+        };
         if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
             return Err(DenseCompileError::CrossEntityDependency {
                 derived: name.to_string(),
@@ -1080,8 +1115,13 @@ impl<'a> DenseCompiler<'a> {
             });
         }
 
+        let (source_semantics, effective_from) = match versioned_semantics {
+            Some((semantics, from)) => (semantics, Some(from)),
+            None => (&derived.semantics, None),
+        };
+
         self.visiting.insert(name.to_string());
-        let compiled_semantics = match &derived.semantics {
+        let compiled_semantics = match source_semantics {
             DerivedSemantics::Scalar(expr) => {
                 CompiledSemantics::Scalar(self.compile_scalar_expr(name, expr)?)
             }
@@ -1096,6 +1136,7 @@ impl<'a> DenseCompiler<'a> {
             name: derived.name.clone(),
             semantics: compiled_semantics,
             rounding: derived.rounding,
+            effective_from,
         });
         self.derived_index.insert(name.to_string(), index);
         Ok(index)

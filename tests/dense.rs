@@ -3470,3 +3470,71 @@ rules:
     };
     assert_eq!(values, &vec![decimal("0.5")]);
 }
+
+/// A derived rule with a single unbounded version compiles into a dense plan (that shape is
+/// what every declared rule has since #84 stopped discarding commencement dates), but the plan
+/// must refuse to answer for a period before the rule commenced rather than computing a
+/// pre-commencement number. Dense compiles once and executes for many periods, so the date is
+/// enforced per execution.
+#[test]
+fn dense_versioned_derived_refuses_periods_before_commencement() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: taper_fraction
+    kind: derived
+    entity: Scalar
+    dtype: Rate
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: |-
+          1 / 2
+"#;
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec module compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, None)
+        .expect("a single unbounded version compiles densely");
+
+    let batch = || DenseBatchSpec {
+        row_count: 1,
+        inputs: HashMap::new(),
+        relations: HashMap::new(),
+    };
+
+    // On the commencement month the plan answers normally.
+    let on_time = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("date"),
+    };
+    dense
+        .execute(
+            &on_time.to_model().expect("period converts"),
+            batch(),
+            &["taper_fraction".to_string()],
+        )
+        .expect("executes on its effective date");
+
+    // A month before commencement must fail the same way the generic executor does.
+    let too_early = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2025, 12, 1).expect("date"),
+        end: chrono::NaiveDate::from_ymd_opt(2025, 12, 31).expect("date"),
+    };
+    let error = dense
+        .execute(
+            &too_early.to_model().expect("period converts"),
+            batch(),
+            &["taper_fraction".to_string()],
+        )
+        .expect_err("must not answer before commencement");
+    assert!(
+        matches!(
+            error,
+            axiom_rules_engine::engine::EvalError::MissingDerivedFormulaVersion { ref derived, .. }
+                if derived == "taper_fraction"
+        ),
+        "unexpected error: {error:?}"
+    );
+}
