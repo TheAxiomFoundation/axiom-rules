@@ -387,6 +387,566 @@ fn related_inputs_use_latest_covering_start_in_every_mode_and_order() {
 }
 
 #[test]
+fn explain_trace_closes_short_circuited_dependency_edges() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: gate_1
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_1_value
+  - name: gate_2
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_2_value
+  - name: gate_3
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_3_value
+  - name: gate_4
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_4_value
+  - name: gate_5
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_5_value
+  - name: gate_6
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_6_value
+  - name: gate_7
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_7_value
+  - name: snap_eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: gate_1 and gate_2 and gate_3 and gate_4 and gate_5 and gate_6 and gate_7
+"#;
+    let period = simple_period();
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let dataset = DatasetSpec {
+        inputs: [
+            ("gate_1_value", true),
+            ("gate_2_value", true),
+            ("gate_3_value", false),
+        ]
+        .into_iter()
+        .map(|(name, value)| InputRecordSpec {
+            name: name.to_string(),
+            entity: "Household".to_string(),
+            entity_id: "household-1".to_string(),
+            interval: IntervalSpec {
+                start: period.start,
+                end: period.end,
+            },
+            value: ScalarValueSpec::Bool { value },
+        })
+        .collect(),
+        relations: vec![],
+    };
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["snap_eligible".to_string()],
+        }],
+    })
+    .expect("short-circuited request succeeds without skipped inputs");
+    let result = &response.results[0];
+    assert_eq!(
+        judgment_output(
+            result
+                .outputs
+                .get("snap_eligible")
+                .expect("eligibility output")
+        ),
+        JudgmentOutcomeSpec::NotHolds
+    );
+
+    let node = serde_json::to_value(
+        result
+            .trace
+            .get("snap_eligible")
+            .expect("eligibility trace node"),
+    )
+    .expect("trace node serialises");
+    let actual = node["dependencies"]
+        .as_array()
+        .expect("actual dependencies are an array");
+    assert_eq!(actual.len(), 3, "only traversed gates are actual edges");
+    for dependency in actual {
+        let dependency = dependency.as_str().expect("dependency key is text");
+        assert!(
+            result.trace.contains_key(dependency),
+            "actual dependency `{dependency}` must resolve to a trace node"
+        );
+    }
+    let skipped = node["not_evaluated_dependencies"]
+        .as_array()
+        .expect("skipped dependency edges are explicit");
+    assert_eq!(skipped.len(), 4);
+    assert!(skipped.iter().all(|dependency| {
+        dependency["reason"]
+            .as_str()
+            .is_some_and(|reason| reason == "short_circuit")
+    }));
+}
+
+#[test]
+fn trace_skip_status_is_parent_specific_even_when_child_is_cached() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: first_gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: false
+  - name: cached_but_skipped_gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: true
+  - name: eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: first_gate and cached_but_skipped_gate
+"#;
+    let period = simple_period();
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec::default(),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            // Warm the would-be skipped child before evaluating its parent.
+            outputs: vec![
+                "cached_but_skipped_gate".to_string(),
+                "eligible".to_string(),
+            ],
+        }],
+    })
+    .expect("request succeeds");
+    assert!(
+        response.results[0]
+            .trace
+            .contains_key("cached_but_skipped_gate"),
+        "separately requested child has an evaluated node"
+    );
+
+    let parent = serde_json::to_value(
+        response.results[0]
+            .trace
+            .get("eligible")
+            .expect("parent trace node"),
+    )
+    .expect("trace node serialises");
+    assert_eq!(
+        parent["dependencies"],
+        serde_json::json!(["first_gate"]),
+        "a warm cache must not turn an untraversed parent edge into an actual edge"
+    );
+    assert_eq!(
+        parent["not_evaluated_dependencies"][0]["dependency"],
+        "cached_but_skipped_gate"
+    );
+}
+
+#[test]
+fn trace_execution_projection_uses_selected_parameter_not_authored_source() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: weeks_per_year
+    kind: parameter
+    dtype: Number
+    source: 52 benefit weeks
+    versions:
+      - effective_from: 2026-01-01
+        formula: 52
+  - name: weekly_value
+    kind: derived
+    entity: Person
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: 2026-01-01
+        formula: supplied_weekly_value
+  - name: annual_entitlement
+    kind: derived
+    entity: Person
+    dtype: Money
+    unit: GBP
+    source: Authored prose incorrectly says payment spans 365/7 calendar weeks.
+    versions:
+      - effective_from: 2026-01-01
+        formula: weekly_value * weeks_per_year
+"#;
+    let period = simple_period();
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "supplied_weekly_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: decimal_value("8.50"),
+            }],
+            relations: vec![],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "person-1".to_string(),
+            period,
+            outputs: vec!["annual_entitlement".to_string()],
+        }],
+    })
+    .expect("annual entitlement request succeeds");
+    assert_eq!(
+        decimal_output(
+            response.results[0]
+                .outputs
+                .get("annual_entitlement")
+                .expect("annual entitlement output")
+        ),
+        decimal("442")
+    );
+
+    let node = serde_json::to_value(
+        response.results[0]
+            .trace
+            .get("annual_entitlement")
+            .expect("annual entitlement trace node"),
+    )
+    .expect("trace node serialises");
+    let executed_expression = node["executed_expression"]
+        .as_str()
+        .expect("executed expression is present");
+    assert!(executed_expression.contains("weekly_value"));
+    assert!(executed_expression.contains("weeks_per_year"));
+    assert!(
+        !executed_expression.contains("365/7"),
+        "authored prose cannot become the calculation narrative"
+    );
+    let reads = node["parameter_reads"]
+        .as_array()
+        .expect("parameter reads are present");
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0]["parameter"], "weeks_per_year");
+    assert_eq!(reads[0]["index"], 0);
+    assert_eq!(reads[0]["value"]["value"], serde_json::json!(52));
+}
+
+#[test]
+fn trace_records_or_and_if_skips_with_closed_actual_edges() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: true_gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: true
+  - name: skipped_gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: missing_gate_input
+  - name: any_gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: true_gate or skipped_gate
+  - name: selected_amount
+    kind: derived
+    entity: Household
+    dtype: Number
+    versions:
+      - effective_from: 2026-01-01
+        formula: 10
+  - name: skipped_amount
+    kind: derived
+    entity: Household
+    dtype: Number
+    versions:
+      - effective_from: 2026-01-01
+        formula: missing_amount
+  - name: conditional_amount
+    kind: derived
+    entity: Household
+    dtype: Number
+    versions:
+      - effective_from: 2026-01-01
+        formula: "if true_gate: selected_amount else: skipped_amount"
+"#;
+    let period = simple_period();
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec::default(),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["any_gate".to_string(), "conditional_amount".to_string()],
+        }],
+    })
+    .expect("unselected branches do not require their missing inputs");
+    let trace = &response.results[0].trace;
+
+    let or_node =
+        serde_json::to_value(trace.get("any_gate").expect("Or trace node")).expect("serialises");
+    assert_eq!(or_node["dependencies"], serde_json::json!(["true_gate"]));
+    assert_eq!(
+        or_node["not_evaluated_dependencies"],
+        serde_json::json!([{
+            "dependency": "skipped_gate",
+            "reason": "short_circuit"
+        }])
+    );
+
+    let if_node = serde_json::to_value(
+        trace
+            .get("conditional_amount")
+            .expect("conditional trace node"),
+    )
+    .expect("serialises");
+    assert_eq!(
+        if_node["dependencies"],
+        serde_json::json!(["true_gate", "selected_amount"])
+    );
+    assert_eq!(
+        if_node["not_evaluated_dependencies"],
+        serde_json::json!([{
+            "dependency": "skipped_amount",
+            "reason": "branch_not_selected"
+        }])
+    );
+
+    for (key, node) in trace {
+        let node = serde_json::to_value(node).expect("trace node serialises");
+        for dependency in node["dependencies"]
+            .as_array()
+            .expect("dependencies are an array")
+        {
+            let dependency = dependency.as_str().expect("dependency key is text");
+            assert!(
+                trace.contains_key(dependency),
+                "trace node `{key}` has dangling dependency `{dependency}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn trace_closure_includes_related_entity_instances() {
+    let period = simple_period();
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            derivation: None,
+        }],
+        derived: vec![
+            DerivedSpec {
+                id: None,
+                name: "person_amount".to_string(),
+                entity: "Person".to_string(),
+                dtype: DTypeSpec::Decimal,
+                unit: None,
+                rounding: None,
+                source: None,
+                period: None,
+                source_url: None,
+                corpus_citation_path: None,
+                semantics: DerivedSemanticsSpec::Scalar {
+                    expr: ScalarExprSpec::Input {
+                        name: "amount".to_string(),
+                    },
+                },
+                versions: vec![],
+            },
+            DerivedSpec {
+                id: None,
+                name: "household_amount".to_string(),
+                entity: "Household".to_string(),
+                dtype: DTypeSpec::Decimal,
+                unit: None,
+                rounding: None,
+                source: None,
+                period: None,
+                source_url: None,
+                corpus_citation_path: None,
+                semantics: DerivedSemanticsSpec::Scalar {
+                    expr: ScalarExprSpec::SumRelated {
+                        relation: "member_of_household".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                        value: RelatedValueRefSpec::Derived {
+                            name: "person_amount".to_string(),
+                        },
+                        where_clause: None,
+                    },
+                },
+                versions: vec![],
+            },
+        ],
+        ..ProgramSpec::default()
+    };
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "amount".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: decimal_value("25"),
+            }],
+            relations: vec![RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["household_amount".to_string()],
+        }],
+    })
+    .expect("related derived request succeeds");
+    let trace = &response.results[0].trace;
+    let parent = serde_json::to_value(trace.get("household_amount").expect("parent trace node"))
+        .expect("serialises");
+    let dependency = parent["dependencies"][0]
+        .as_str()
+        .expect("related instance dependency key");
+    assert!(
+        trace.contains_key(dependency),
+        "related instance edge must resolve"
+    );
+    let child = serde_json::to_value(trace.get(dependency).expect("related child trace node"))
+        .expect("serialises");
+    assert_eq!(child["name"], "person_amount");
+    assert_eq!(child["entity_id"], "person-1");
+}
+
+#[test]
+fn old_trace_json_deserializes_without_execution_projection_fields() {
+    let old_wire_shape = serde_json::json!({
+        "kind": "judgment",
+        "name": "eligible",
+        "id": null,
+        "unit": null,
+        "outcome": "holds",
+        "source": null,
+        "source_url": null,
+        "dependencies": []
+    });
+    let node: axiom_rules_engine::api::DerivedTraceNode =
+        serde_json::from_value(old_wire_shape).expect("old trace JSON remains readable");
+    assert!(matches!(
+        node,
+        axiom_rules_engine::api::DerivedTraceNode::Judgment { .. }
+    ));
+}
+
+#[test]
+fn trace_excludes_cached_nodes_from_prior_query_entities() {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    let response = execute_request(simple_execution_request(ExecutionMode::Explain, program))
+        .expect("multi-entity Explain request succeeds");
+
+    assert_eq!(response.results.len(), 2);
+    for result in &response.results {
+        assert_eq!(
+            result.trace.len(),
+            1,
+            "a query trace must not include nodes cached while evaluating another entity"
+        );
+        let node = serde_json::to_value(
+            result
+                .trace
+                .get("adjusted_amount")
+                .expect("current entity trace node"),
+        )
+        .expect("trace node serialises");
+        assert_eq!(node["entity_id"], result.entity_id);
+        assert!(
+            result.trace.keys().all(|key| !key.contains("@entity:")),
+            "unrelated cached entity instances must not leak into this query trace"
+        );
+    }
+}
+
+#[test]
 fn fast_mode_coerces_integer_and_decimal_if_branches() {
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
