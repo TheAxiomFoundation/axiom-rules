@@ -233,6 +233,14 @@ pub enum RuleSpecError {
         new: usize,
     },
     #[error(
+        "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
+    )]
+    ConflictingUnitDeclarations {
+        name: String,
+        first: String,
+        second: String,
+    },
+    #[error(
         "RuleSpec module `{path}` declares source_verification.source_sha256 `{value}`, which is not a 64-character hexadecimal SHA-256 digest"
     )]
     InvalidSourceSha256 { path: String, value: String },
@@ -1874,6 +1882,7 @@ impl RulesDocument {
         if !self.relations.is_empty() {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
         }
+        self.validate_unit_declarations()?;
         let mut formula_source = String::new();
         self.write_header(&mut formula_source);
 
@@ -2021,6 +2030,23 @@ impl RulesDocument {
             }
         }
         Ok(diagnostics)
+    }
+
+    fn validate_unit_declarations(&self) -> Result<(), RuleSpecError> {
+        let mut declarations: HashMap<&str, &crate::spec::UnitKindSpec> = HashMap::new();
+        for unit in &self.units {
+            if let Some(first) = declarations.get(unit.name.as_str())
+                && !unit_kinds_equal(first, &unit.kind)
+            {
+                return Err(RuleSpecError::ConflictingUnitDeclarations {
+                    name: unit.name.clone(),
+                    first: unit_kind_label(first),
+                    second: unit_kind_label(&unit.kind),
+                });
+            }
+            declarations.entry(&unit.name).or_insert(&unit.kind);
+        }
+        Ok(())
     }
 
     fn apply_rule_ids(&self, program: &mut ProgramSpec) {
@@ -2547,6 +2573,38 @@ impl RuleDefinition {
             .clone()
             .or_else(|| self.sources.iter().find_map(|source| source.url.clone()));
         (citation, url)
+    }
+}
+
+fn unit_kinds_equal(left: &crate::spec::UnitKindSpec, right: &crate::spec::UnitKindSpec) -> bool {
+    use crate::spec::UnitKindSpec;
+
+    match (left, right) {
+        (
+            UnitKindSpec::Currency { minor_units: left },
+            UnitKindSpec::Currency { minor_units: right },
+        ) => left == right,
+        (UnitKindSpec::Count, UnitKindSpec::Count)
+        | (UnitKindSpec::Ratio, UnitKindSpec::Ratio)
+        | (UnitKindSpec::Duration, UnitKindSpec::Duration) => true,
+        (UnitKindSpec::Custom { label: left }, UnitKindSpec::Custom { label: right }) => {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+fn unit_kind_label(kind: &crate::spec::UnitKindSpec) -> String {
+    use crate::spec::UnitKindSpec;
+
+    match kind {
+        UnitKindSpec::Currency { minor_units } => {
+            format!("currency(minor_units: {minor_units})")
+        }
+        UnitKindSpec::Count => "count".to_string(),
+        UnitKindSpec::Ratio => "ratio".to_string(),
+        UnitKindSpec::Duration => "duration".to_string(),
+        UnitKindSpec::Custom { label } => format!("custom(label: {label})"),
     }
 }
 

@@ -2417,6 +2417,65 @@ rules:
 }
 
 #[test]
+fn rulespec_rejects_conflicting_unit_declarations_in_either_order() {
+    for (first, second) in [(2, 4), (4, 2)] {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+units:
+  - name: EUR
+    kind: currency
+    minor_units: {first}
+  - name: EUR
+    kind: currency
+    minor_units: {second}
+rules: []
+"#
+        );
+
+        let error = lower_rulespec_str(&rulespec)
+            .expect_err("conflicting repeated unit declarations must be rejected");
+        assert!(matches!(
+            error,
+            RuleSpecError::ConflictingUnitDeclarations {
+                name,
+                first: first_kind,
+                second: second_kind,
+            } if name == "EUR"
+                && first_kind == format!("currency(minor_units: {first})")
+                && second_kind == format!("currency(minor_units: {second})")
+        ));
+    }
+}
+
+#[test]
+fn rulespec_allows_identical_repeated_unit_declarations() {
+    let rulespec = r#"
+format: rulespec/v1
+units:
+  - name: EUR
+    kind: currency
+    minor_units: 2
+  - name: EUR
+    kind: currency
+    minor_units: 2
+rules: []
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("identical declarations are idempotent");
+    let eur = program
+        .units
+        .iter()
+        .filter(|unit| unit.name == "EUR")
+        .collect::<Vec<_>>();
+    assert_eq!(eur.len(), 1);
+    assert!(matches!(
+        eur[0].kind,
+        UnitKindSpec::Currency { minor_units: 2 }
+    ));
+}
+
+#[test]
 fn non_exhaustive_match_warns_by_default_and_errors_in_strict_mode() {
     let rulespec = r#"
 format: rulespec/v1
