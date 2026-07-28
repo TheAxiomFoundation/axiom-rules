@@ -5,7 +5,9 @@ use axiom_rules_engine::compile::{
     CompileError, CompiledProgramArtifact, compile_program_file_to_json,
 };
 use axiom_rules_engine::rulespec::{
-    CanonicalRuleSpecRoots, RuleSpecError, ValidationStatus, lower_rulespec_str,
+    CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
+    ValidationStatus, load_rulespec_file_with_options, lower_rulespec_str,
+    lower_rulespec_str_with_options,
 };
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
@@ -2286,6 +2288,164 @@ rules:
             expr: ScalarExprSpec::Input { name },
         } if name == "able_account_contributions"
     ));
+}
+
+#[test]
+fn non_exhaustive_match_warns_by_default_and_errors_in_strict_mode() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+"#;
+
+    let outcome = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::default())
+        .expect("compatibility lowering succeeds");
+    assert_eq!(outcome.diagnostics.len(), 1);
+    let diagnostic = &outcome.diagnostics[0];
+    assert_eq!(diagnostic.code, RuleSpecDiagnosticCode::NonExhaustiveMatch);
+    assert_eq!(diagnostic.path, "<memory>");
+    assert_eq!(diagnostic.rule, "filing_credit");
+    assert_eq!(diagnostic.occurrences, 1);
+    assert!(
+        diagnostic
+            .to_string()
+            .contains("add a final `_ => <fallback>` arm")
+    );
+
+    // Compatibility lowering retains every concrete pattern. The final
+    // `joint` arm is an actual comparison, not an erased fallthrough.
+    let derived = outcome
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "filing_credit")
+        .expect("derived output present");
+    let DerivedSemanticsSpec::Scalar { expr } = &derived.semantics else {
+        panic!("filing_credit should lower as a scalar");
+    };
+    let ScalarExprSpec::If {
+        else_expr: joint_arm,
+        ..
+    } = expr
+    else {
+        panic!("single pattern should lower to an if");
+    };
+    assert!(
+        matches!(joint_arm.as_ref(), ScalarExprSpec::If { .. }),
+        "the final concrete pattern must be preserved as a comparison"
+    );
+
+    let error = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::strict())
+        .expect_err("strict lowering rejects a match without a wildcard");
+    assert!(matches!(
+        error,
+        RuleSpecError::StrictDiagnostics(report)
+            if report.diagnostics.len() == 1
+                && report.diagnostics[0].rule == "filing_credit"
+    ));
+}
+
+#[test]
+fn exhaustive_match_uses_an_explicit_wildcard_without_a_diagnostic() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+              _ => 0
+"#;
+
+    let outcome = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::strict())
+        .expect("a final wildcard is exhaustive");
+    assert!(outcome.diagnostics.is_empty());
+
+    let derived = outcome
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "filing_credit")
+        .expect("derived output present");
+    let DerivedSemanticsSpec::Scalar { expr } = &derived.semantics else {
+        panic!("filing_credit should lower as a scalar");
+    };
+    let ScalarExprSpec::If {
+        else_expr: joint_arm,
+        ..
+    } = expr
+    else {
+        panic!("single pattern should lower to an if");
+    };
+    let ScalarExprSpec::If {
+        else_expr: wildcard,
+        ..
+    } = joint_arm.as_ref()
+    else {
+        panic!("joint pattern should lower to an if");
+    };
+    assert!(matches!(
+        wildcard.as_ref(),
+        ScalarExprSpec::Literal {
+            value: ScalarValueSpec::Integer { value: 0 }
+        }
+    ));
+}
+
+#[test]
+fn match_diagnostic_names_the_canonical_source_file() {
+    let root = unique_test_root();
+    let repository = root.join("rulespec-us");
+    let rules_file = repository.join("us/policies/tax/filing-credit.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repository");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let roots = CanonicalRuleSpecRoots::new([&repository]).expect("repository root is valid");
+    let outcome =
+        load_rulespec_file_with_options(&rules_file, &roots, RuleSpecLoweringOptions::default())
+            .expect("compatibility lowering succeeds");
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(outcome.diagnostics[0].path, "us:policies/tax/filing-credit");
+    assert!(
+        outcome.diagnostics[0]
+            .to_string()
+            .contains("RuleSpec file `us:policies/tax/filing-credit`")
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

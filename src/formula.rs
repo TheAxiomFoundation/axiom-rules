@@ -456,6 +456,7 @@ pub enum Expr {
     Match {
         subject: Box<Expr>,
         cases: Vec<(Expr, Expr)>,
+        default: Option<Box<Expr>>,
     },
 }
 
@@ -804,6 +805,7 @@ impl Parser {
         let subject = self.parse_or()?;
         self.consume(TokType::Colon)?;
         let mut cases = Vec::new();
+        let mut default = None;
         while matches!(
             self.peek(0).ty,
             TokType::Int
@@ -814,14 +816,27 @@ impl Parser {
                 | TokType::Ident
         ) && self.peek(1).ty == TokType::Arrow
         {
+            if default.is_some() {
+                let tok = self.peek(0);
+                return Err(FormulaError::parse(
+                    tok.line,
+                    tok.col,
+                    "a match wildcard arm must be final",
+                ));
+            }
             let pat = self.parse_primary()?;
             self.consume(TokType::Arrow)?;
             let res = self.parse_expr()?;
-            cases.push((pat, res));
+            if matches!(&pat, Expr::Var(name) if name == "_") {
+                default = Some(Box::new(res));
+            } else {
+                cases.push((pat, res));
+            }
         }
         Ok(Expr::Match {
             subject: Box::new(subject),
             cases,
+            default,
         })
     }
 
@@ -1657,20 +1672,31 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             then_expr: Box::new(lower_to_scalar(then_expr, ctx)?),
             else_expr: Box::new(lower_to_scalar(else_expr, ctx)?),
         },
-        Expr::Match { subject, cases } => {
-            // Lower as nested if/elif: `match s: a => x, b => y, c => z` →
-            // `if s == a: x elif s == b: y else: z`. The last case's value
-            // becomes the else branch (rather than a default 0) so all
-            // branches share the same dtype — the dense compiler enforces
-            // branch-dtype equality.
-            if cases.is_empty() {
+        Expr::Match {
+            subject,
+            cases,
+            default,
+        } => {
+            // Lower every concrete arm as a comparison. A final `_ => ...`
+            // arm is the explicit fallback. In compatibility mode a match
+            // without `_` retains the historical last result as its fallback,
+            // but its final pattern is still represented and RuleSpec lowering
+            // emits a warning (or rejects it in strict mode).
+            if cases.is_empty() && default.is_none() {
                 return Err(FormulaError::lower("empty match".to_string()));
             }
             let subj_scalar = lower_to_scalar(subject, ctx)?;
-            let (last_pat, last_res) = cases.last().unwrap();
-            let _ = last_pat; // last case is the fallthrough; pattern value unused
-            let mut expr = lower_to_scalar(last_res, ctx)?;
-            for (pat, res) in cases.iter().rev().skip(1) {
+            let mut expr = match default {
+                Some(default) => lower_to_scalar(default, ctx)?,
+                None => lower_to_scalar(
+                    &cases
+                        .last()
+                        .expect("non-empty match has a compatibility fallback")
+                        .1,
+                    ctx,
+                )?,
+            };
+            for (pat, res) in cases.iter().rev() {
                 expr = ScalarExprSpec::If {
                     condition: Box::new(JudgmentExprSpec::Comparison {
                         left: Box::new(subj_scalar.clone()),
@@ -1850,6 +1876,71 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
 pub(crate) fn lower_source(source: &str) -> Result<ProgramSpec, FormulaError> {
     let module = parse_source(source)?;
     lower_module(&module)
+}
+
+/// Count `match` expressions that do not declare a final `_ => ...` arm.
+///
+/// RuleSpec uses this before lowering so compatibility mode can surface a
+/// warning while strict mode rejects the same source. Parsing is shared with
+/// normal formula lowering, so diagnostics cannot drift from the accepted
+/// expression grammar.
+pub(crate) fn non_exhaustive_match_count(formula: &str) -> Result<usize, FormulaError> {
+    let tokens = Lexer::new(formula).tokenise()?;
+    let mut parser = Parser::new(tokens);
+    let expr = parser.parse_expr()?;
+    if parser.peek(0).ty != TokType::Eof {
+        let tok = parser.peek(0);
+        return Err(FormulaError::parse(
+            tok.line,
+            tok.col,
+            "unexpected trailing token in formula",
+        ));
+    }
+    Ok(count_non_exhaustive_matches(&expr))
+}
+
+fn count_non_exhaustive_matches(expr: &Expr) -> usize {
+    match expr {
+        Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitStr(_) | Expr::LitBool(_) | Expr::Var(_) => {
+            0
+        }
+        Expr::BinOp { left, right, .. } => {
+            count_non_exhaustive_matches(left) + count_non_exhaustive_matches(right)
+        }
+        Expr::UnaryOp { operand, .. } => count_non_exhaustive_matches(operand),
+        Expr::Call { args, .. } => args.iter().map(count_non_exhaustive_matches).sum(),
+        Expr::FieldAccess { obj, .. } => count_non_exhaustive_matches(obj),
+        Expr::Index { target, index } => {
+            count_non_exhaustive_matches(target) + count_non_exhaustive_matches(index)
+        }
+        Expr::Cond {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            count_non_exhaustive_matches(condition)
+                + count_non_exhaustive_matches(then_expr)
+                + count_non_exhaustive_matches(else_expr)
+        }
+        Expr::Match {
+            subject,
+            cases,
+            default,
+        } => {
+            usize::from(default.is_none())
+                + count_non_exhaustive_matches(subject)
+                + cases
+                    .iter()
+                    .map(|(pattern, result)| {
+                        count_non_exhaustive_matches(pattern) + count_non_exhaustive_matches(result)
+                    })
+                    .sum::<usize>()
+                + default
+                    .as_deref()
+                    .map(count_non_exhaustive_matches)
+                    .unwrap_or(0)
+        }
+    }
 }
 
 pub(crate) fn lower_judgment_formula(

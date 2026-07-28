@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 #[cfg(feature = "fs")]
 use std::fs;
 #[cfg(feature = "fs")]
@@ -223,6 +224,85 @@ pub enum RuleSpecError {
         "RuleSpec module `{path}` declares removed plural `corpus_citation_paths`; every source/proof node must declare exactly one singular `corpus_citation_path`"
     )]
     PluralCorpusCitationPaths { path: String },
+    #[error("strict RuleSpec validation failed:\n{0}")]
+    StrictDiagnostics(RuleSpecDiagnosticReport),
+}
+
+/// Options for RuleSpec semantic lowering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuleSpecLoweringOptions {
+    /// Promote compatibility diagnostics to hard errors.
+    pub strict: bool,
+}
+
+impl RuleSpecLoweringOptions {
+    pub const fn strict() -> Self {
+        Self { strict: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleSpecDiagnosticCode {
+    NonExhaustiveMatch,
+}
+
+impl RuleSpecDiagnosticCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NonExhaustiveMatch => "non_exhaustive_match",
+        }
+    }
+}
+
+/// A compatibility diagnostic produced while lowering a RuleSpec module.
+///
+/// Diagnostics are warnings under the default options and errors under
+/// [`RuleSpecLoweringOptions::strict`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleSpecDiagnostic {
+    pub code: RuleSpecDiagnosticCode,
+    /// Canonical module target, or `<memory>` for an in-memory document.
+    pub path: String,
+    pub rule: String,
+    pub occurrences: usize,
+}
+
+impl fmt::Display for RuleSpecDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let expression = if self.occurrences == 1 {
+            "expression"
+        } else {
+            "expressions"
+        };
+        write!(
+            formatter,
+            "RuleSpec file `{}` rule `{}` has {} non-exhaustive `match` {expression}; add a final `_ => <fallback>` arm to each match",
+            self.path, self.rule, self.occurrences
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleSpecDiagnosticReport {
+    pub diagnostics: Vec<RuleSpecDiagnostic>,
+}
+
+impl fmt::Display for RuleSpecDiagnosticReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            write!(formatter, "{diagnostic}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RuleSpecLoweringOutcome {
+    pub program: ProgramSpec,
+    pub diagnostics: Vec<RuleSpecDiagnostic>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -749,6 +829,15 @@ fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
 }
 
 pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome = lower_rulespec_str_with_options(source, RuleSpecLoweringOptions::default())?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+pub fn lower_rulespec_str_with_options(
+    source: &str,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     if !looks_like_rulespec_yaml(source) {
         return Err(RuleSpecError::MissingDiscriminator);
     }
@@ -759,7 +848,7 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
     document.validate_atomic_module_metadata("<memory>")?;
     document.assign_origin_target(None);
-    document.to_program_spec()
+    document.to_program_spec_with_options(options)
 }
 
 #[cfg(feature = "fs")]
@@ -767,9 +856,20 @@ pub fn load_rulespec_file(
     path: impl AsRef<Path>,
     roots: &CanonicalRuleSpecRoots,
 ) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome = load_rulespec_file_with_options(path, roots, RuleSpecLoweringOptions::default())?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+#[cfg(feature = "fs")]
+pub fn load_rulespec_file_with_options(
+    path: impl AsRef<Path>,
+    roots: &CanonicalRuleSpecRoots,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let target = roots.target_for_path(path.as_ref())?;
     let source = crate::source::FsModuleSource::from_validated_roots(roots.clone());
-    load_rulespec_with_source(&target, &source)
+    load_rulespec_with_source_with_options(&target, &source, options)
 }
 
 /// Load an ephemeral RuleSpec program emitted by `axiom-compose`.
@@ -783,6 +883,18 @@ pub fn load_composed_rulespec_file(
     path: impl AsRef<Path>,
     roots: &CanonicalRuleSpecRoots,
 ) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome =
+        load_composed_rulespec_file_with_options(path, roots, RuleSpecLoweringOptions::default())?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+#[cfg(feature = "fs")]
+pub fn load_composed_rulespec_file_with_options(
+    path: impl AsRef<Path>,
+    roots: &CanonicalRuleSpecRoots,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let path = path.as_ref();
     validate_exact_regular_yaml(path)?;
     if roots.contains_path(path) {
@@ -812,7 +924,7 @@ pub fn load_composed_rulespec_file(
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
-    combined.to_program_spec()
+    combined.to_program_spec_with_options(options)
 }
 
 /// Load and lower the module at `root_target` (canonical form, for example
@@ -828,10 +940,30 @@ pub fn load_rulespec_with_source(
     root_target: &str,
     source: &dyn ModuleSource,
 ) -> Result<ProgramSpec, RuleSpecError> {
+    let outcome = load_rulespec_with_source_with_options(
+        root_target,
+        source,
+        RuleSpecLoweringOptions::default(),
+    )?;
+    emit_rule_spec_diagnostics(&outcome.diagnostics);
+    Ok(outcome.program)
+}
+
+pub fn load_rulespec_with_source_with_options(
+    root_target: &str,
+    source: &dyn ModuleSource,
+    options: RuleSpecLoweringOptions,
+) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let root_target = validate_module_target(root_target)?;
     let mut context = SourceLoadContext::default();
     let document = load_rulespec_document_from_source(&root_target, source, &mut context)?;
-    document.to_program_spec()
+    document.to_program_spec_with_options(options)
+}
+
+fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!("warning[{}]: {diagnostic}", diagnostic.code.as_str());
+    }
 }
 
 #[derive(Default)]
@@ -1706,6 +1838,21 @@ impl RulesDocument {
     }
 
     pub fn to_program_spec(&self) -> Result<ProgramSpec, RuleSpecError> {
+        let outcome = self.to_program_spec_with_options(RuleSpecLoweringOptions::default())?;
+        emit_rule_spec_diagnostics(&outcome.diagnostics);
+        Ok(outcome.program)
+    }
+
+    pub fn to_program_spec_with_options(
+        &self,
+        options: RuleSpecLoweringOptions,
+    ) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
+        let diagnostics = self.compatibility_diagnostics()?;
+        if options.strict && !diagnostics.is_empty() {
+            return Err(RuleSpecError::StrictDiagnostics(RuleSpecDiagnosticReport {
+                diagnostics,
+            }));
+        }
         if !self.relations.is_empty() {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
         }
@@ -1822,7 +1969,39 @@ impl RulesDocument {
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
-        Ok(program)
+        Ok(RuleSpecLoweringOutcome {
+            program,
+            diagnostics,
+        })
+    }
+
+    fn compatibility_diagnostics(&self) -> Result<Vec<RuleSpecDiagnostic>, RuleSpecError> {
+        let mut diagnostics = Vec::new();
+        for rule in &self.rules {
+            let mut occurrences = 0;
+            for version in rule.effective_versions() {
+                if let Some(formula) = version
+                    .formula
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|formula| !formula.is_empty())
+                {
+                    occurrences += crate::formula::non_exhaustive_match_count(formula)?;
+                }
+            }
+            if occurrences > 0 {
+                diagnostics.push(RuleSpecDiagnostic {
+                    code: RuleSpecDiagnosticCode::NonExhaustiveMatch,
+                    path: rule
+                        .origin_target
+                        .clone()
+                        .unwrap_or_else(|| "<memory>".to_string()),
+                    rule: rule.name.clone(),
+                    occurrences,
+                });
+            }
+        }
+        Ok(diagnostics)
     }
 
     fn apply_rule_ids(&self, program: &mut ProgramSpec) {
