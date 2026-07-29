@@ -34,6 +34,46 @@ Do not use friendly aliases as public references. Public refs must be full
 RuleSpec IDs with a path and fragment. Formula-local symbols may be short inside
 a compiled module, but app/API surfaces should expose durable IDs.
 
+## Acronyms
+
+Write vocabulary acronyms and initialisms as single lowercase tokens: `fpl`,
+`agi`, `eitc`, `ssn`. Never letter-split them (`f_p_l`) and never uppercase
+them. Uppercase is reserved for source-stated legal designators carried into
+a name, such as `7527A` in `aggregate_advance_payments_under_section_7527A`
+or `D` in a subsection reference. axiom-encode's name lint rejects accidental
+mixed-case tokens such as `ipV` and states this convention in its message; it
+cannot verify source-statedness, so an all-uppercase token passes the lint
+and acronym casing stays a review item.
+
+Use the short form only when it is a standing term in the source domain
+(SNAP, EITC, AGI, FPL, ABAWD). If the law or agency vocabulary does not use
+the term as an acronym, spell the words out.
+
+Display surfaces derive labels from fragments by title-casing word by word
+and upper-casing tokens found in an acronym registry. The canonical
+registries are `RULE_NAME_ACRONYMS` in `axiom-foundation.org`
+`src/components/axiom/graph-viewer/citations.ts` and
+`rulespec-graph-viewer` `src/citations.ts`; the app carries further sets
+following the same convention for program labels, breadcrumbs, and document
+nodes. An unregistered lowercase acronym token renders as a plain word —
+without their entries, `eitc_child_count` would render as "Eitc Child Count"
+and `_48_states_dc` as "48 States Dc". Nothing in the encode or apply
+pipeline updates these registries: when an encoding introduces a new acronym
+token, the PR author or reviewer flags it, and the flag is closed by
+updating the affected display humanizers or by linking an owned follow-up
+that will.
+
+Registry matching is whole-word, so `debt` and `debtor` are unaffected by
+`ebt`. The registries also feed document-slug humanization, so admission is
+judged against every displayable use — rule and input fragments plus
+dash-slug document segments. `snap`, `cola`, and `leap` qualify today
+because every current use means the program or adjustment; `co` does not,
+because `co_resident_gross_income` means co-resident while `co_snap_*` means
+Colorado. The check runs both ways: any newly humanized value — fragment or
+document slug — that uses a registered token as an ordinary word forces a
+rename or an unregistration, so check the registry when introducing one that
+contains a registered word.
+
 ## Executable Rules
 
 Executable `parameter` and `derived` names should follow this pattern:
