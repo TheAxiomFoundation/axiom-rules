@@ -846,7 +846,7 @@ fn collect_semantics_relation_usages(
 ) {
     match semantics {
         DerivedSemantics::Scalar(expr) => {
-            collect_scalar_relation_usages(program, expr, entity, citing_rule, usages);
+            collect_scalar_relation_usages(program, expr, Some(entity), citing_rule, usages);
         }
         DerivedSemantics::Judgment(expr) => {
             collect_judgment_relation_usages(
@@ -864,7 +864,7 @@ fn collect_semantics_relation_usages(
 fn collect_scalar_relation_usages(
     program: &Program,
     expr: &ScalarExpr,
-    entity: &str,
+    entity: Option<&str>,
     citing_rule: &str,
     usages: &mut Vec<RelationUsage>,
 ) {
@@ -967,14 +967,7 @@ fn collect_scalar_relation_usages(
             then_expr,
             else_expr,
         } => {
-            collect_judgment_relation_usages(
-                program,
-                condition,
-                Some(entity),
-                None,
-                citing_rule,
-                usages,
-            );
+            collect_judgment_relation_usages(program, condition, entity, None, citing_rule, usages);
             collect_scalar_relation_usages(program, then_expr, entity, citing_rule, usages);
             collect_scalar_relation_usages(program, else_expr, entity, citing_rule, usages);
         }
@@ -997,10 +990,12 @@ fn collect_judgment_relation_usages(
 ) {
     match expr {
         JudgmentExpr::Comparison { left, right, .. } => {
-            if let Some(entity) = entity {
-                collect_scalar_relation_usages(program, left, entity, citing_rule, usages);
-                collect_scalar_relation_usages(program, right, entity, citing_rule, usages);
-            }
+            // Even without an enclosing entity kind, nested aggregates may
+            // independently constrain their related slot through a predicate
+            // or value rule. Preserve that partial usage instead of treating
+            // the nested relation as unused.
+            collect_scalar_relation_usages(program, left, entity, citing_rule, usages);
+            collect_scalar_relation_usages(program, right, entity, citing_rule, usages);
         }
         JudgmentExpr::Derived(_) => {}
         JudgmentExpr::RelationMember {
@@ -1051,15 +1046,16 @@ fn executable_current_kind(
     program: &Program,
     relation: &str,
     current_slot: usize,
-    owner_entity: &str,
+    owner_entity: Option<&str>,
 ) -> Option<String> {
     let schema = program.relations.get(relation)?;
     if let Some(derivation) = schema.derivation.as_ref()
+        && let Some(owner_entity) = owner_entity
         && derivation.entity.as_deref() == Some(owner_entity)
     {
         return derivation.slot_entities.get(current_slot).cloned();
     }
-    Some(owner_entity.to_string())
+    owner_entity.map(str::to_string)
 }
 
 fn related_entity_kind(

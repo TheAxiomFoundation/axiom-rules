@@ -2329,19 +2329,18 @@ rules:
     assert!(warning.contains("snap_unit"), "{warning}");
 }
 
-#[test]
-fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
-    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+fn nested_sum_program(outer_slots: &[&str], inner_slots: &[&str]) -> ProgramSpec {
+    serde_json::from_value(serde_json::json!({
         "relations": [
             {
                 "name": "member_of_tax_unit",
                 "arity": 2,
-                "slot_entities": ["Person", "TaxUnit"]
+                "slot_entities": outer_slots
             },
             {
                 "name": "payment_of_person",
                 "arity": 2,
-                "slot_entities": ["Payment", "Person"]
+                "slot_entities": inner_slots
             }
         ],
         "derived": [
@@ -2410,27 +2409,15 @@ fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
             }
         ]
     }))
-    .expect("nested aggregate ProgramSpec parses");
-    let artifact =
-        CompiledProgramArtifact::compile(program).expect("nested aggregate program compiles");
-    assert!(
-        artifact
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.code != "relation_orientation_mismatch"),
-        "the Payment rule inside the nested sum must not type the outer Person slot: {:?}",
-        artifact.diagnostics
-    );
+    .expect("nested aggregate ProgramSpec parses")
+}
 
-    let runtime = artifact
-        .program
-        .to_program()
-        .expect("runtime program builds");
+fn nested_sum_dataset() -> DatasetSpec {
     let interval = IntervalSpec {
         start: "2026-01-01".parse().expect("valid date"),
         end: "2026-12-31".parse().expect("valid date"),
     };
-    let dataset = DatasetSpec {
+    DatasetSpec {
         inputs: vec![
             InputRecordSpec {
                 name: "person_marker_input".to_string(),
@@ -2468,13 +2455,69 @@ fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
                 interval,
             },
         ],
-    };
-    let outcome = dataset
+    }
+}
+
+#[test]
+fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
+    let artifact = CompiledProgramArtifact::compile(nested_sum_program(
+        &["Person", "TaxUnit"],
+        &["Payment", "Person"],
+    ))
+    .expect("nested aggregate program compiles");
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "relation_orientation_mismatch"),
+        "the Payment rule inside the nested sum must not type the outer Person slot: {:?}",
+        artifact.diagnostics
+    );
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let outcome = nested_sum_dataset()
         .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
         .expect("working nested aggregate tuple orders bind");
     assert!(
         outcome.diagnostics.is_empty(),
         "both executable tuple orders must remain warning-free: {:?}",
+        outcome.diagnostics
+    );
+}
+
+#[test]
+fn nested_sum_related_retains_partial_orientation_under_untyped_outer_relation() {
+    let artifact =
+        CompiledProgramArtifact::compile(nested_sum_program(&[], &["Person", "Payment"]))
+            .expect("nested aggregate program compiles");
+    let orientation_diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        orientation_diagnostics.len(),
+        1,
+        "the nested sum remains a program use even when its owner kind starts unknown"
+    );
+    let diagnostic = orientation_diagnostics[0].to_string();
+    assert!(diagnostic.contains("payment_of_person"), "{diagnostic}");
+    assert!(diagnostic.contains("[Person, Payment]"), "{diagnostic}");
+    assert!(diagnostic.contains("[Payment, Person]"), "{diagnostic}");
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let outcome = nested_sum_dataset()
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+        .expect("working nested aggregate tuple orders bind");
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "partial usage must prevent declaration fallback from warning on the working inner tuple: {:?}",
         outcome.diagnostics
     );
 }

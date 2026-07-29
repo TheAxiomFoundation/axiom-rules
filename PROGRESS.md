@@ -79,6 +79,12 @@ passes. Work is moving to final repository gates and independent review.
   `[Person, TaxUnit]` relation and `[Payment, Payment]` for the inner
   `[Payment, Person]` relation. Treating nested aggregate internals as a
   separate execution context makes both executable tuple orders warning-free.
+- Focused re-review found that an untyped outer relation still suppressed the
+  nested scalar traversal. A second red regression observed no executable-use
+  diagnostic for reversed inner declaration `[Person, Payment]`. Relation
+  traversal now carries an optional current kind, retaining the independently
+  derived inner `[Payment, Person]` orientation; compile warns on the reversed
+  declaration and binding leaves the working tuple warning-free.
 
 ## Next
 
