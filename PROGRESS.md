@@ -70,9 +70,17 @@ passes. Work is moving to final repository gates and independent review.
   - the executable-order tuple returns count 1 with no bind warning;
   - the declaration-order tuple returns count 0 with two bind warnings, one
     for each reversed slot.
+- Independent evidence review reproduced the corpus counts, census, worklist,
+  and 26/32 transcript without a gate-blocking finding.
+- Independent code review found that a nested aggregate's predicate/value
+  entity could contaminate its enclosing relation's orientation.
+- Added a nested `sum_related` regression covering both compile and bind
+  diagnostics. Red evidence derived `[Payment, TaxUnit]` for the outer
+  `[Person, TaxUnit]` relation and `[Payment, Payment]` for the inner
+  `[Payment, Person]` relation. Treating nested aggregate internals as a
+  separate execution context makes both executable tuple orders warning-free.
 
 ## Next
 
-1. Run all repository gates and request an independent review.
-2. Fix any actionable findings, finalize this progress log, and write the
-   completed report to `out.md`.
+1. Re-run all repository gates after the review fix.
+2. Finalize this progress log and write the completed report to `out.md`.

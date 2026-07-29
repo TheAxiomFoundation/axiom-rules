@@ -11,8 +11,8 @@ use axiom_rules_engine::rulespec::{
 };
 use axiom_rules_engine::spec::{
     DatasetBindingDiagnosticCode, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
-    InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, RelationRecordSpec, ScalarExprSpec,
-    ScalarValueSpec, SpecError, UnitKindSpec,
+    InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelationRecordSpec,
+    ScalarExprSpec, ScalarValueSpec, SpecError, UnitKindSpec,
 };
 use std::fs;
 use std::path::Path;
@@ -2327,6 +2327,156 @@ rules:
     assert!(warning.contains("[Household, Person]"), "{warning}");
     assert!(warning.contains("[Person, Household]"), "{warning}");
     assert!(warning.contains("snap_unit"), "{warning}");
+}
+
+#[test]
+fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {
+                "name": "member_of_tax_unit",
+                "arity": 2,
+                "slot_entities": ["Person", "TaxUnit"]
+            },
+            {
+                "name": "payment_of_person",
+                "arity": 2,
+                "slot_entities": ["Payment", "Person"]
+            }
+        ],
+        "derived": [
+            {
+                "name": "payment_amount",
+                "entity": "Payment",
+                "dtype": "decimal",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "payment_amount_input"
+                }
+            },
+            {
+                "name": "person_marker",
+                "entity": "Person",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "person_marker_input"
+                }
+            },
+            {
+                "name": "tax_unit_marker",
+                "entity": "TaxUnit",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "tax_unit_marker_input"
+                }
+            },
+            {
+                "name": "qualifying_person_count",
+                "entity": "TaxUnit",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "count_related",
+                    "relation": "member_of_tax_unit",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": {
+                        "kind": "comparison",
+                        "left": {
+                            "kind": "sum_related",
+                            "relation": "payment_of_person",
+                            "current_slot": 1,
+                            "related_slot": 0,
+                            "value": {
+                                "kind": "derived",
+                                "name": "payment_amount"
+                            }
+                        },
+                        "op": "gt",
+                        "right": {
+                            "kind": "literal",
+                            "value": {
+                                "kind": "decimal",
+                                "value": "0"
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .expect("nested aggregate ProgramSpec parses");
+    let artifact =
+        CompiledProgramArtifact::compile(program).expect("nested aggregate program compiles");
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "relation_orientation_mismatch"),
+        "the Payment rule inside the nested sum must not type the outer Person slot: {:?}",
+        artifact.diagnostics
+    );
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_marker_input".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "tax_unit_marker_input".to_string(),
+                entity: "TaxUnit".to_string(),
+                entity_id: "tax-unit".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "payment_amount_input".to_string(),
+                entity: "Payment".to_string(),
+                entity_id: "payment".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Decimal {
+                    value: "10".to_string(),
+                },
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_tax_unit".to_string(),
+                tuple: vec!["person".to_string(), "tax-unit".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "payment_of_person".to_string(),
+                tuple: vec!["payment".to_string(), "person".to_string()],
+                interval,
+            },
+        ],
+    };
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+        .expect("working nested aggregate tuple orders bind");
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "both executable tuple orders must remain warning-free: {:?}",
+        outcome.diagnostics
+    );
 }
 
 #[test]

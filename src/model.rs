@@ -1148,26 +1148,11 @@ fn collect_scalar_derived_entities(
             collect_scalar_derived_entities(program, from, entities);
             collect_scalar_derived_entities(program, to, entities);
         }
-        ScalarExpr::CountRelated { where_clause, .. } => {
-            if let Some(where_clause) = where_clause {
-                collect_referenced_derived_entities(program, where_clause, entities);
-            }
-        }
-        ScalarExpr::SumRelated {
-            value,
-            where_clause,
-            ..
-        } => {
-            if let RelatedValueRef::Derived(name) = value
-                && let Some(derived) = program.derived.get(name)
-                && derived.entity != SCALAR_ENTITY
-            {
-                entities.insert(derived.entity.clone());
-            }
-            if let Some(where_clause) = where_clause {
-                collect_referenced_derived_entities(program, where_clause, entities);
-            }
-        }
+        // A nested aggregate's predicate and value execute on that aggregate's
+        // related ID, not on the enclosing predicate's entity. Its own usage
+        // traversal handles those references after the enclosing orientation
+        // is established.
+        ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {}
         ScalarExpr::If {
             condition,
             then_expr,
