@@ -51,17 +51,17 @@ the term as an acronym, spell the words out.
 
 Display surfaces derive labels from fragments by title-casing word by word
 and upper-casing tokens found in an acronym registry. The canonical
-registries are `RULE_NAME_ACRONYMS` in `axiom-foundation.org`
-`src/components/axiom/graph-viewer/citations.ts` and
-`rulespec-graph-viewer` `src/citations.ts`; the app carries further sets
-following the same convention for program labels, breadcrumbs, and document
-nodes. An unregistered lowercase acronym token renders as a plain word —
-without their entries, `eitc_child_count` would render as "Eitc Child Count"
-and `_48_states_dc` as "48 States Dc". Nothing in the encode or apply
+registries are `DISPLAY_ACRONYMS` in `axiom-foundation.org`
+`src/lib/display-acronyms.ts` — one shared registry every app humanizer
+(rule names, program labels, breadcrumbs, document nodes, search labels)
+consults, so a new token is exactly one addition — and its hand-synced
+mirror `RULE_NAME_ACRONYMS` in `rulespec-graph-viewer` `src/citations.ts`.
+An unregistered lowercase acronym token renders as a plain word — without
+their entries, `eitc_child_count` would render as "Eitc Child Count" and
+`_48_states_dc` as "48 States Dc". Nothing in the encode or apply
 pipeline updates these registries: when an encoding introduces a new acronym
 token, the PR author or reviewer flags it, and the flag is closed by
-updating the affected display humanizers or by linking an owned follow-up
-that will.
+updating the registries or by linking an owned follow-up that will.
 
 Registry matching is whole-word, so `debt` and `debtor` are unaffected by
 `ebt`. The registries also feed document-slug humanization, so admission is
