@@ -11,6 +11,7 @@ use crate::model::{
     InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
     Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
     RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
+    relation_usage_orientations,
 };
 
 #[derive(Debug, Error)]
@@ -390,6 +391,7 @@ fn relation_slot_entity_diagnostics(
             .or_insert_with(|| Some(input.entity.clone()));
     }
 
+    let usage_orientations = relation_usage_orientations(program);
     let mut diagnostics = Vec::new();
     for record in relations {
         let schema = program
@@ -399,9 +401,24 @@ fn relation_slot_entity_diagnostics(
         if schema.slot_entities.is_empty() {
             continue;
         }
-        for (slot, (entity_id, expected_entity)) in
-            record.tuple.iter().zip(&schema.slot_entities).enumerate()
-        {
+        // Used relations follow the orientation encoded in executable
+        // count/sum/membership nodes. Raw declaration order is positional
+        // authority only for a relation with no program use.
+        let expected_entities = usage_orientations.get(&record.name).map_or_else(
+            || {
+                schema
+                    .slot_entities
+                    .iter()
+                    .cloned()
+                    .map(Some)
+                    .collect::<Vec<_>>()
+            },
+            |orientation| orientation.slot_entities.clone(),
+        );
+        for (slot, entity_id) in record.tuple.iter().enumerate() {
+            let Some(expected_entity) = expected_entities.get(slot).and_then(Option::as_ref) else {
+                continue;
+            };
             let Some(Some(actual_entity)) = entity_by_id.get(entity_id) else {
                 continue;
             };

@@ -2185,6 +2185,213 @@ rules:
     );
 }
 
+const ORIENTATION_MISMATCH_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: eitc_qualifying_child
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: is_eligible
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: case_value
+  - name: eitc_child_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: count_where(qualifying_child_of_tax_unit, eitc_qualifying_child)
+"#;
+
+#[test]
+fn relation_orientation_mismatch_warns_by_default_and_errors_in_strict_compile_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("orientation mismatch is warning-ratcheted by default");
+    assert_eq!(
+        artifact.program.relations[0].slot_entities,
+        vec!["TaxUnit", "Person"],
+        "the artifact must retain source order verbatim"
+    );
+    let diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = diagnostics[0].to_string();
+    assert!(diagnostic.contains("qualifying_child_of_tax_unit"));
+    assert!(diagnostic.contains("[TaxUnit, Person]"));
+    assert!(diagnostic.contains("[Person, TaxUnit]"));
+    assert!(diagnostic.contains("eitc_child_count"));
+
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    let reloaded = CompiledProgramArtifact::from_json_str(&json)
+        .expect("artifact loading recomputes the orientation warning");
+    assert_eq!(
+        reloaded
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+            .count(),
+        1
+    );
+    let reload_error = CompiledProgramArtifact::from_json_str_with_options(
+        &json,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict artifact loading recomputes and rejects the mismatch");
+    assert!(
+        reload_error
+            .to_string()
+            .contains("relation_orientation_mismatch"),
+        "{reload_error}"
+    );
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        ORIENTATION_MISMATCH_RULESPEC,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects executable orientation mismatch");
+    assert!(
+        error.to_string().contains("relation_orientation_mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn derived_relation_membership_contributes_usage_orientation() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+  - name: eligible_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: eligible
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and eligible_member
+"#,
+    )
+    .expect("derived relation orientation mismatch is warning-ratcheted");
+    let diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    let warning = diagnostics[0].to_string();
+    assert!(warning.contains("member_of_household"), "{warning}");
+    assert!(warning.contains("[Household, Person]"), "{warning}");
+    assert!(warning.contains("[Person, Household]"), "{warning}");
+    assert!(warning.contains("snap_unit"), "{warning}");
+}
+
+#[test]
+fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("orientation fixture compiles in compatibility mode");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let inputs = vec![
+        InputRecordSpec {
+            name: "is_eligible".to_string(),
+            entity: "Person".to_string(),
+            entity_id: "related-0".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: true },
+        },
+        InputRecordSpec {
+            name: "case_value".to_string(),
+            entity: "TaxUnit".to_string(),
+            entity_id: "case".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Integer { value: 1 },
+        },
+    ];
+    let dataset_with_tuple = |tuple: [&str; 2]| DatasetSpec {
+        inputs: inputs.clone(),
+        relations: vec![RelationRecordSpec {
+            name: "qualifying_child_of_tax_unit".to_string(),
+            tuple: tuple.into_iter().map(str::to_string).collect(),
+            interval: interval.clone(),
+        }],
+    };
+
+    let working = dataset_with_tuple(["related-0", "case"]);
+    let working_outcome = working
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("working order binds");
+    assert!(
+        working_outcome.diagnostics.is_empty(),
+        "the count-producing order must not receive a kind warning"
+    );
+
+    let broken = dataset_with_tuple(["case", "related-0"]);
+    let broken_outcome = broken
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("broken order remains compatible under the warning ratchet");
+    assert_eq!(
+        broken_outcome.diagnostics.len(),
+        2,
+        "both reversed concrete kinds must be diagnosed"
+    );
+    assert_eq!(broken_outcome.diagnostics[0].slot, 0);
+    assert_eq!(broken_outcome.diagnostics[0].expected_entity, "Person");
+    assert_eq!(broken_outcome.diagnostics[0].actual_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[1].slot, 1);
+    assert_eq!(broken_outcome.diagnostics[1].expected_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[1].actual_entity, "Person");
+}
+
 #[test]
 fn relation_slot_entity_mismatch_warns_by_default_and_errors_in_strict_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(

@@ -5,8 +5,9 @@ without rewriting them. Network access is prohibited.
 
 ## State
 
-Amendment A is implemented and focused tests are green. Work is moving to the
-usage-derived orientation tests and implementation.
+Amendments A and B are implemented. The full default-feature `cargo test`
+suite is green. Work is moving to the staged-corpus sweep and 26/32 dynamic
+acceptance transcript.
 
 ## Done
 
@@ -31,12 +32,27 @@ usage-derived orientation tests and implementation.
   `CompileOptions::strict_relation_entities` did not exist.
 - Green evidence: 82 RuleSpec tests, 12 module-source tests, and five
   namespace-ratchet unit tests pass.
+- Added deterministic program-level relation usage analysis shared by compile
+  validation and dataset binding:
+  - aggregate owner entity constrains `current_slot`;
+  - predicate/value entity constrains `related_slot`;
+  - membership and derived-relation source uses propagate structural kinds;
+  - versioned rules inspect executable versions rather than phantom base
+    semantics;
+  - conflicting uses leave a slot unresolved instead of choosing arbitrarily.
+- Added `warning[relation_orientation_mismatch]`, strict compile promotion,
+  artifact reload recomputation, and source-fidelity preservation.
+- Binding now uses executable orientation for used relations and declaration
+  order only for unused relations.
+- Red evidence: the 26/32-shaped fixture had no compile warning, warned on the
+  working tuple, and did not warn on the empty-lookup tuple; the membership
+  fixture also had no orientation warning.
+- Green evidence: all three orientation tests pass, including strict/reload
+  behavior and derived-relation membership. Full `cargo test` passes.
 
 ## Next
 
-1. Add failing tests for usage-derived orientation and binding behavior; then
-   implement Amendment B.
-2. Run the five-corpus sweep, report the orientation census and every
+1. Run the five-corpus sweep, report the orientation census and every
    inconsistent relation, and reproduce the amended 26/32 transcript.
-3. Run all repository gates, request an independent review, fix actionable
+2. Run all repository gates, request an independent review, fix actionable
    findings, and write the completed report to `out.md`.

@@ -109,8 +109,14 @@ rules:
 ```
 
 Compiled artifacts carry declared argument kinds as
-`program.relations[].slot_entities`. Rust callers can promote relation argument
-shape/closure warnings to errors at compile time with:
+`program.relations[].slot_entities`. The compiler separately derives the
+orientation that executable `count_related`, `sum_related`, and membership
+nodes use. If that orientation disagrees with the declaration, compilation
+emits `warning[relation_orientation_mismatch]` naming both orders and a citing
+rule. The serialized declaration remains verbatim for source fidelity.
+
+Rust callers can promote relation argument shape/closure/orientation warnings
+to errors at compile time with:
 
 ```rust
 CompiledProgramArtifact::from_rulespec_str_with_options(
@@ -124,8 +130,12 @@ CompiledProgramArtifact::from_rulespec_str_with_options(
 
 This compile option is independent of binding strictness. During dataset
 binding, the engine derives an opaque entity id's kind from dataset input
-records that carry both `entity_id` and `entity`. A known mismatch emits
-`warning[relation_slot_entity_mismatch]` by default; ids absent from the input
+records that carry both `entity_id` and `entity`. For a relation used by the
+program, expected tuple positions come from executable usage; unresolved or
+conflicting positions are skipped. Only an unused relation falls back to its
+declared position order. This prevents validation from recommending an order
+that the engine indexes as an empty lookup. A known mismatch emits
+`warning[relation_slot_entity_mismatch]` by default; ids absent from input
 records, or ids used with more than one kind, remain unknown and are skipped.
 Rust callers can promote these warnings to errors with
 `DatasetSpec::to_dataset_for_program_with_options(program,

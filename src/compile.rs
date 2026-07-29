@@ -240,8 +240,17 @@ impl CompiledProgramArtifact {
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
-        let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
+        let mut diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
         let metadata = compiled_metadata(&program)?;
+        let orientation_diagnostics = relation_orientation_diagnostics(&program, path)?;
+        if options.strict_relation_entities && !orientation_diagnostics.is_empty() {
+            return Err(CompileError::StrictRelationEntityDiagnostics(
+                CompileDiagnosticReport {
+                    diagnostics: orientation_diagnostics,
+                },
+            ));
+        }
+        diagnostics.extend(orientation_diagnostics);
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -276,6 +285,15 @@ impl CompiledProgramArtifact {
                 "metadata does not match the compiled program",
             ));
         }
+        let orientation_diagnostics = relation_orientation_diagnostics(&self.program, path)?;
+        if options.strict_relation_entities && !orientation_diagnostics.is_empty() {
+            return Err(CompileError::StrictRelationEntityDiagnostics(
+                CompileDiagnosticReport {
+                    diagnostics: orientation_diagnostics,
+                },
+            ));
+        }
+        self.diagnostics.extend(orientation_diagnostics);
         Ok(self)
     }
 
@@ -496,6 +514,65 @@ impl CompiledProgramArtifact {
 }
 
 const DUPLICATE_PARAMETER_DIAGNOSTIC: &str = "duplicate_parameter_name";
+const RELATION_ORIENTATION_DIAGNOSTIC: &str = "relation_orientation_mismatch";
+
+fn relation_orientation_diagnostics(
+    program: &ProgramSpec,
+    path: &str,
+) -> Result<Vec<CompileDiagnostic>, CompileError> {
+    let runtime_program = program.to_program()?;
+    let usages = crate::model::relation_usage_records(&runtime_program);
+    let mut relations = program
+        .relations
+        .iter()
+        .filter(|relation| relation.derivation.is_none() && !relation.slot_entities.is_empty())
+        .collect::<Vec<_>>();
+    relations.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut diagnostics = Vec::new();
+    for relation in relations {
+        let Some(usage) = usages.iter().find(|usage| {
+            usage.relation == relation.name
+                && usage
+                    .slot_entities
+                    .iter()
+                    .zip(&relation.slot_entities)
+                    .any(|(used, declared)| used.as_ref().is_some_and(|used| used != declared))
+        }) else {
+            continue;
+        };
+        diagnostics.push(CompileDiagnostic {
+            code: RELATION_ORIENTATION_DIAGNOSTIC,
+            path: relation
+                .name
+                .split_once("#relation.")
+                .map_or_else(|| path.to_string(), |(target, _)| target.to_string()),
+            message: format!(
+                "data relation `{}` declares slot entity order {}, but executable usage derives order {} (citing rule `{}`); the declaration remains verbatim, and strict relation entity mode treats this warning as an error",
+                relation.name,
+                format_declared_slot_entities(&relation.slot_entities),
+                format_usage_slot_entities(&usage.slot_entities),
+                usage.citing_rule,
+            ),
+        });
+    }
+    Ok(diagnostics)
+}
+
+fn format_declared_slot_entities(entities: &[String]) -> String {
+    format!("[{}]", entities.join(", "))
+}
+
+fn format_usage_slot_entities(entities: &[Option<String>]) -> String {
+    format!(
+        "[{}]",
+        entities
+            .iter()
+            .map(|entity| entity.as_deref().unwrap_or("?"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
 
 fn normalize_parameter_duplicates(
     program: &mut ProgramSpec,
