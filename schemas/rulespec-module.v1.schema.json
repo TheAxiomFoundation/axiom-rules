@@ -188,6 +188,34 @@
           "data_relation": {
             "additionalProperties": true,
             "properties": {
+              "arguments": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "properties": {
+                        "entity": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "entity"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "arity": {
                 "minimum": 0,
                 "type": "integer"

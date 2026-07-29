@@ -1294,6 +1294,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         program.relations.push(RelationSpec {
             name,
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         });
     }

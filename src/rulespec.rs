@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 #[cfg(feature = "fs")]
 use std::fs;
@@ -126,6 +126,23 @@ pub enum RuleSpecError {
     TopLevelArityUnsupported { name: String },
     #[error("RuleSpec data relation `{name}` must declare data_relation.arity")]
     MissingDataRelationArity { name: String },
+    #[error(
+        "RuleSpec data relation `{name}` declares {argument_count} {argument_word}, but has arity {arity}; declare exactly one entity kind per relation slot"
+    )]
+    DataRelationArgumentCountMismatch {
+        name: String,
+        arity: usize,
+        argument_count: usize,
+        argument_word: &'static str,
+    },
+    #[error(
+        "RuleSpec data relation `{name}` declares unknown argument entity kind `{argument}`; known entity kinds in the compiled program closure are: {known}"
+    )]
+    UnknownDataRelationArgumentEntity {
+        name: String,
+        argument: String,
+        known: String,
+    },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation")]
     MissingDerivedRelation { name: String },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation.arity")]
@@ -235,6 +252,14 @@ pub enum RuleSpecError {
         name: String,
         existing: usize,
         new: usize,
+    },
+    #[error(
+        "RuleSpec relation `{name}` is declared with conflicting slot entity kinds {existing:?} and {new:?}"
+    )]
+    RelationSlotEntitiesConflict {
+        name: String,
+        existing: Vec<String>,
+        new: Vec<String>,
     },
     #[error(
         "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
@@ -531,10 +556,38 @@ pub struct SourceRef {
     pub url: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum DataRelationArgumentRef {
+    Entity(String),
+    Named { entity: String },
+}
+
+fn deserialize_data_relation_arguments<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let arguments =
+        Option::<Vec<DataRelationArgumentRef>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(arguments
+        .into_iter()
+        .map(|argument| match argument {
+            DataRelationArgumentRef::Entity(entity) | DataRelationArgumentRef::Named { entity } => {
+                entity
+            }
+        })
+        .collect())
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DataRelationRef {
     #[serde(default)]
     pub arity: Option<usize>,
+    /// Entity kind occupying each relation slot. The object form
+    /// `{name: ..., entity: ...}` predates the compact string form; its
+    /// descriptive name is intentionally discarded while its entity is kept.
+    #[serde(default, deserialize_with = "deserialize_data_relation_arguments")]
+    pub arguments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1993,6 +2046,7 @@ impl RulesDocument {
                 .retain(|parameter| !table_parameter_names.contains(&parameter.name));
             program.parameters.extend(table_parameters);
         }
+        self.validate_data_relation_arguments(&mut explicit_relations, &program)?;
         self.apply_rule_ids(&mut program);
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
@@ -2050,6 +2104,107 @@ impl RulesDocument {
                 });
             }
             declarations.entry(&unit.name).or_insert(&unit.kind);
+        }
+        Ok(())
+    }
+
+    fn validate_data_relation_arguments(
+        &self,
+        relations: &mut [RelationSpec],
+        lowered_program: &ProgramSpec,
+    ) -> Result<(), RuleSpecError> {
+        // The engine deliberately has no global entity-kind registry. The
+        // authority here is the import-merged RuleSpec closure: every
+        // top-level `entity:` field survives in `self.rules`, including kinds
+        // on declarations whose later IR omits the field. We union those with
+        // the actually lowered derived entities so the Scalar pseudo-entity is
+        // admitted exactly when formula lowering materializes it.
+        let mut known = self
+            .rules
+            .iter()
+            .filter_map(|rule| rule.entity.as_deref())
+            .filter(|entity| !entity.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        known.extend(
+            lowered_program
+                .derived
+                .iter()
+                .map(|derived| derived.entity.clone()),
+        );
+        let known_label = if known.is_empty() {
+            "<none>".to_string()
+        } else {
+            known.iter().cloned().collect::<Vec<_>>().join(", ")
+        };
+
+        for rule in &self.rules {
+            if !matches!(rule.kind, Some(RuleKind::DataRelation)) {
+                continue;
+            }
+            let Some(data_relation) = rule.data_relation.as_ref() else {
+                continue;
+            };
+            if data_relation.arguments.is_empty() {
+                // Empty is the explicit legacy/undeclared representation.
+                continue;
+            }
+            let arity =
+                data_relation
+                    .arity
+                    .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
+                        name: rule.name.clone(),
+                    })?;
+            if data_relation.arguments.len() != arity {
+                let argument_count = data_relation.arguments.len();
+                return Err(RuleSpecError::DataRelationArgumentCountMismatch {
+                    name: rule.name.clone(),
+                    arity,
+                    argument_count,
+                    argument_word: if argument_count == 1 {
+                        "argument"
+                    } else {
+                        "arguments"
+                    },
+                });
+            }
+
+            let mut slot_entities = data_relation.arguments.clone();
+            let legacy_role_labels = slot_entities
+                .iter()
+                .all(|argument| !known.contains(argument) && is_legacy_relation_role(argument));
+            if legacy_role_labels && known.len() == 1 {
+                // One staged pre-contract module used lower_snake_case role
+                // labels (`individual`, `household_member`) rather than entity
+                // kinds. When the closure has exactly one kind, its intended
+                // same-kind relation is unambiguous; canonicalize to that sole
+                // authority. With zero or multiple kinds we fail below rather
+                // than guess. PascalCase typos also fail rather than entering
+                // this narrowly-scoped compatibility path.
+                let sole_kind = known
+                    .first()
+                    .expect("a one-element set has a first item")
+                    .clone();
+                slot_entities.fill(sole_kind);
+            }
+
+            if let Some(argument) = slot_entities
+                .iter()
+                .find(|argument| !known.contains(*argument))
+            {
+                return Err(RuleSpecError::UnknownDataRelationArgumentEntity {
+                    name: rule.name.clone(),
+                    argument: argument.clone(),
+                    known: known_label.clone(),
+                });
+            }
+
+            let relation_name = rule.canonical_relation_id();
+            let relation = relations
+                .iter_mut()
+                .find(|relation| relation.name == relation_name)
+                .expect("every data relation rule was lowered before validation");
+            relation.slot_entities = slot_entities;
         }
         Ok(())
     }
@@ -2278,16 +2433,21 @@ impl RuleDefinition {
     }
 
     fn to_data_relation_spec(&self) -> Result<RelationSpec, RuleSpecError> {
-        let arity = self
-            .data_relation
-            .as_ref()
-            .and_then(|data_relation| data_relation.arity)
+        let data_relation =
+            self.data_relation
+                .as_ref()
+                .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
+                    name: self.name.clone(),
+                })?;
+        let arity = data_relation
+            .arity
             .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
                 name: self.name.clone(),
             })?;
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
+            slot_entities: data_relation.arguments.clone(),
             derivation: None,
         })
     }
@@ -2341,6 +2501,7 @@ impl RuleDefinition {
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
+            slot_entities: derived_relation.slot_entities.clone(),
             derivation: Some(RelationDerivationSpec {
                 source_relation,
                 current_slot: derived_relation
@@ -2608,6 +2769,16 @@ fn unit_kinds_equal(left: &crate::spec::UnitKindSpec, right: &crate::spec::UnitK
     }
 }
 
+fn is_legacy_relation_role(value: &str) -> bool {
+    value
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn unit_kind_label(kind: &crate::spec::UnitKindSpec) -> String {
     use crate::spec::UnitKindSpec;
 
@@ -2656,6 +2827,17 @@ fn append_missing_relations(
                     existing: existing.arity,
                     new: relation.arity,
                 });
+            }
+            if !relation.slot_entities.is_empty() {
+                if existing.slot_entities.is_empty() {
+                    existing.slot_entities = relation.slot_entities.clone();
+                } else if existing.slot_entities != relation.slot_entities {
+                    return Err(RuleSpecError::RelationSlotEntitiesConflict {
+                        name: relation.name.clone(),
+                        existing: existing.slot_entities.clone(),
+                        new: relation.slot_entities.clone(),
+                    });
+                }
             }
             if existing.derivation.is_none() && relation.derivation.is_some() {
                 existing.derivation = relation.derivation.clone();

@@ -1950,6 +1950,247 @@ rules:
 }
 
 #[test]
+fn rulespec_data_relation_arguments_round_trip_through_artifact() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(qualifying_child_of_tax_unit)
+"#,
+    )
+    .expect("declared relation entity kinds compile");
+
+    let json = serde_json::to_value(&artifact).expect("artifact serializes");
+    let relation = json["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "qualifying_child_of_tax_unit")
+        .expect("declared relation is present");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["TaxUnit", "Person"])
+    );
+
+    let reloaded = CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&json).expect("artifact JSON serializes"),
+    )
+    .expect("artifact with declared relation entity kinds reloads");
+    let runtime_program = reloaded
+        .program
+        .to_program()
+        .expect("reloaded artifact builds the runtime model");
+    assert_eq!(
+        runtime_program
+            .relations
+            .get("qualifying_child_of_tax_unit")
+            .expect("runtime relation is present")
+            .slot_entities,
+        vec!["TaxUnit", "Person"]
+    );
+    let round_tripped = serde_json::to_value(reloaded).expect("reloaded artifact serializes");
+    let relation = round_tripped["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "qualifying_child_of_tax_unit")
+        .expect("declared relation survives reload");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["TaxUnit", "Person"])
+    );
+}
+
+#[test]
+fn rulespec_legacy_named_data_relation_arguments_carry_their_entity_kinds() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments:
+        - name: member
+          entity: Person
+        - name: household
+          entity: Household
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect("legacy named relation arguments remain accepted");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Person", "Household"])
+    );
+}
+
+#[test]
+fn rulespec_legacy_role_labels_use_the_closures_only_entity_kind() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_individuals_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [individual, household_member]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect("unambiguous legacy role labels remain compatible");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Person", "Person"])
+    );
+}
+
+#[test]
+fn rulespec_scalar_is_known_only_when_lowering_materializes_it() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: scalar_link
+    kind: data_relation
+    data_relation:
+      arity: 1
+      arguments: [Scalar]
+  - name: base
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: computed_scalar
+    kind: derived
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: base + 1
+"#,
+    )
+    .expect("materialized Scalar pseudo-entity is a known relation kind");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Scalar"])
+    );
+}
+
+#[test]
+fn rulespec_rejects_data_relation_argument_count_that_differs_from_arity() {
+    let error = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit]
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect_err("declared relation entity kinds must match arity");
+    let message = error.to_string();
+    assert!(
+        message.contains("qualifying_child_of_tax_unit"),
+        "{message}"
+    );
+    assert!(message.contains("arity 2"), "{message}");
+    assert!(message.contains("1 argument"), "{message}");
+}
+
+#[test]
+fn rulespec_rejects_unknown_data_relation_argument_entity_kind() {
+    let error = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Persno]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect_err("unknown relation entity kinds must fail compilation");
+    let message = error.to_string();
+    assert!(
+        message.contains("qualifying_child_of_tax_unit"),
+        "{message}"
+    );
+    assert!(message.contains("Persno"), "{message}");
+    assert!(message.contains("Person"), "{message}");
+    assert!(message.contains("TaxUnit"), "{message}");
+}
+
+#[test]
 fn rulespec_rejects_missing_rule_kind() {
     let err = lower_rulespec_str(
         r#"

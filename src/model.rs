@@ -427,6 +427,9 @@ impl Derived {
 pub struct RelationSchema {
     pub name: String,
     pub arity: usize,
+    /// Declared entity kind for each tuple position. Empty means the relation
+    /// predates slot typing or otherwise leaves its positions undeclared.
+    pub slot_entities: Vec<String>,
     pub derivation: Option<RelationDerivation>,
 }
 
@@ -514,6 +517,7 @@ impl Program {
         self.add_relation_schema(RelationSchema {
             name: name.into(),
             arity,
+            slot_entities: Vec::new(),
             derivation: None,
         })
     }

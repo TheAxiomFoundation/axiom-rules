@@ -295,6 +295,7 @@ fn related_inputs_use_latest_covering_start_in_every_mode_and_order() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         }],
         derived: vec![DerivedSpec {
@@ -802,6 +803,7 @@ fn trace_closure_includes_related_entity_instances() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         }],
         derived: vec![
@@ -1447,6 +1449,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         }],
         derived: vec![
@@ -1579,6 +1582,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         }],
         derived: vec![DerivedSpec {

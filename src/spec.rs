@@ -35,6 +35,12 @@ pub enum SpecError {
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
     InvalidDatasetRelationReference { reference: String },
+    #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
+    InvalidRelationSlotEntityCount {
+        relation: String,
+        arity: usize,
+        slot_count: usize,
+    },
     #[error(
         "derived rule `{derived}` declares `rounding: {mode}` but its unit {unit} is not a declared currency unit; output rounding only applies to Currency units (with minor_units)"
     )]
@@ -309,15 +315,25 @@ impl UnitKindSpec {
 pub struct RelationSpec {
     pub name: String,
     pub arity: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_entities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derivation: Option<RelationDerivationSpec>,
 }
 
 impl RelationSpec {
     fn to_model(&self) -> Result<RelationSchema, SpecError> {
+        if !self.slot_entities.is_empty() && self.slot_entities.len() != self.arity {
+            return Err(SpecError::InvalidRelationSlotEntityCount {
+                relation: self.name.clone(),
+                arity: self.arity,
+                slot_count: self.slot_entities.len(),
+            });
+        }
         Ok(RelationSchema {
             name: self.name.clone(),
             arity: self.arity,
+            slot_entities: self.slot_entities.clone(),
             derivation: self
                 .derivation
                 .as_ref()
