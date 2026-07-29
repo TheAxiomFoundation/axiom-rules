@@ -5,9 +5,9 @@ without rewriting them. Network access is prohibited.
 
 ## State
 
-Amendments A and B are implemented. The full default-feature `cargo test`
-suite is green. Work is moving to the staged-corpus sweep and 26/32 dynamic
-acceptance transcript.
+Amendments A, B, and the Amendment C census are complete. The default corpus
+result is restored to 40/46, and the amended 26/32 dynamic acceptance check
+passes. Work is moving to final repository gates and independent review.
 
 ## Done
 
@@ -49,10 +49,30 @@ acceptance transcript.
   fixture also had no orientation warning.
 - Green evidence: all three orientation tests pass, including strict/reload
   behavior and derived-relation membership. Full `cargo test` passes.
+- Re-ran the staged default-mode corpus sweep:
+  - 40/46 modules compile, with the same six pre-existing failures as the
+    baseline;
+  - successful compiles emit 39 warnings across 26 invocations: 32
+    `relation_orientation_mismatch`, five
+    `unknown_relation_argument_entity`, one
+    `invalid_relation_argument_entity_shape`, and one pre-existing
+    `non_exhaustive_match`;
+  - the five closure-authority gaps compile successfully by default.
+- Completed the orientation census:
+  - the required 42-relation US cohort has 19 usage-consistent, 22
+    usage-inconsistent, and one unused declaration;
+  - the literal five-root total includes eight additional UK declarations and
+    is 21 consistent, 28 inconsistent, and one unused across 50 declarations;
+  - NZ, BE, and GH contain no declared-argument relations.
+- Re-ran the amended 26/32 dynamic fixture:
+  - compilation preserves declared slots `[TaxUnit, Person]` and emits the
+    orientation warning for executable order `[Person, TaxUnit]`;
+  - the executable-order tuple returns count 1 with no bind warning;
+  - the declaration-order tuple returns count 0 with two bind warnings, one
+    for each reversed slot.
 
 ## Next
 
-1. Run the five-corpus sweep, report the orientation census and every
-   inconsistent relation, and reproduce the amended 26/32 transcript.
-2. Run all repository gates, request an independent review, fix actionable
-   findings, and write the completed report to `out.md`.
+1. Run all repository gates and request an independent review.
+2. Fix any actionable findings, finalize this progress log, and write the
+   completed report to `out.md`.
