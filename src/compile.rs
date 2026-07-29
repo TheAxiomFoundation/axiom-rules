@@ -70,6 +70,8 @@ pub enum CompileError {
         "ambiguous RuleSpec module YAML `{path}` has a top-level `rules:` key but no exact RuleSpec discriminator (`format: rulespec/v1`)"
     )]
     AmbiguousRuleSpecYaml { path: String },
+    #[error("strict relation entity validation failed:\n{0}")]
+    StrictRelationEntityDiagnostics(CompileDiagnosticReport),
     #[error(
         "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
     )]
@@ -102,6 +104,9 @@ pub struct CompileOptions {
     /// This is deliberately narrower than issue #83's future
     /// `--strict-resolution`, which also needs declared-input provenance.
     pub strict_namespaces: bool,
+    /// Escalate relation argument name/shape and executable-orientation
+    /// diagnostics to compile errors. Arity is structural in every mode.
+    pub strict_relation_entities: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +114,23 @@ pub struct CompileDiagnostic {
     pub code: &'static str,
     pub path: String,
     pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompileDiagnosticReport {
+    pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+impl std::fmt::Display for CompileDiagnosticReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            write!(formatter, "{diagnostic}")?;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for CompileDiagnostic {
@@ -167,6 +189,44 @@ impl CompiledProgramArtifact {
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
         Self::compile_at(program, "<program>", options)
+    }
+
+    fn compile_rulespec_outcome(
+        outcome: crate::rulespec::RuleSpecLoweringOutcome,
+        path: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        let rulespec_diagnostics = outcome
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| CompileDiagnostic {
+                code: diagnostic.code.as_str(),
+                path: diagnostic.path,
+                message: diagnostic.message,
+            })
+            .collect::<Vec<_>>();
+        if options.strict_relation_entities {
+            let diagnostics = rulespec_diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    matches!(
+                        diagnostic.code,
+                        "invalid_relation_argument_entity_shape"
+                            | "unknown_relation_argument_entity"
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !diagnostics.is_empty() {
+                return Err(CompileError::StrictRelationEntityDiagnostics(
+                    CompileDiagnosticReport { diagnostics },
+                ));
+            }
+        }
+
+        let mut artifact = Self::compile_at(outcome.program, path, options)?;
+        artifact.diagnostics.splice(0..0, rulespec_diagnostics);
+        Ok(artifact)
     }
 
     fn compile_at(
@@ -228,13 +288,15 @@ impl CompiledProgramArtifact {
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
         if crate::rulespec::looks_like_rulespec_yaml(source) {
-            let program = crate::rulespec::lower_rulespec_str(source).map_err(|error| {
-                CompileError::RuleSpec {
-                    path: "<memory>".to_string(),
-                    error,
-                }
+            let outcome = crate::rulespec::lower_rulespec_str_with_options(
+                source,
+                crate::rulespec::RuleSpecLoweringOptions::default(),
+            )
+            .map_err(|error| CompileError::RuleSpec {
+                path: "<memory>".to_string(),
+                error,
             })?;
-            return Self::compile_at(program, "<memory>", options);
+            return Self::compile_rulespec_outcome(outcome, "<memory>", options);
         }
         if crate::rulespec::has_top_level_rules_key(source) {
             return Err(CompileError::AmbiguousRuleSpecYaml {
@@ -263,14 +325,16 @@ impl CompiledProgramArtifact {
         source: &dyn crate::source::ModuleSource,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
-        let program =
-            crate::rulespec::load_rulespec_with_source(root_target, source).map_err(|error| {
-                CompileError::RuleSpec {
-                    path: root_target.to_string(),
-                    error,
-                }
-            })?;
-        Self::compile_at(program, root_target, options)
+        let outcome = crate::rulespec::load_rulespec_with_source_with_options(
+            root_target,
+            source,
+            crate::rulespec::RuleSpecLoweringOptions::default(),
+        )
+        .map_err(|error| CompileError::RuleSpec {
+            path: root_target.to_string(),
+            error,
+        })?;
+        Self::compile_rulespec_outcome(outcome, root_target, options)
     }
 
     #[cfg(feature = "fs")]
@@ -288,13 +352,16 @@ impl CompiledProgramArtifact {
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
         let p = path.as_ref();
-        let program = crate::rulespec::load_rulespec_file(p, roots).map_err(|error| {
-            CompileError::RuleSpec {
-                path: p.display().to_string(),
-                error,
-            }
+        let outcome = crate::rulespec::load_rulespec_file_with_options(
+            p,
+            roots,
+            crate::rulespec::RuleSpecLoweringOptions::default(),
+        )
+        .map_err(|error| CompileError::RuleSpec {
+            path: p.display().to_string(),
+            error,
         })?;
-        Self::compile_at(program, &p.display().to_string(), options)
+        Self::compile_rulespec_outcome(outcome, &p.display().to_string(), options)
     }
 
     /// Compile an originless RuleSpec composition emitted by `axiom-compose`.
@@ -315,13 +382,16 @@ impl CompiledProgramArtifact {
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
         let p = path.as_ref();
-        let program = crate::rulespec::load_composed_rulespec_file(p, roots).map_err(|error| {
-            CompileError::RuleSpec {
-                path: p.display().to_string(),
-                error,
-            }
+        let outcome = crate::rulespec::load_composed_rulespec_file_with_options(
+            p,
+            roots,
+            crate::rulespec::RuleSpecLoweringOptions::default(),
+        )
+        .map_err(|error| CompileError::RuleSpec {
+            path: p.display().to_string(),
+            error,
         })?;
-        Self::compile_at(program, &p.display().to_string(), options)
+        Self::compile_rulespec_outcome(outcome, &p.display().to_string(), options)
     }
 
     pub fn from_json_str(source: &str) -> Result<Self, CompileError> {
@@ -1534,6 +1604,7 @@ rules:
             duplicate_parameters(4, 4),
             CompileOptions {
                 strict_namespaces: true,
+                ..CompileOptions::default()
             },
         )
         .expect_err("strict namespace mode rejects compatible duplicate declarations");
@@ -1584,6 +1655,7 @@ rules:
             &source,
             CompileOptions {
                 strict_namespaces: true,
+                ..CompileOptions::default()
             },
         )
         .expect_err("strict artifact loading rejects the duplicate");
@@ -1614,6 +1686,7 @@ rules:
             &source,
             CompileOptions {
                 strict_namespaces: true,
+                ..CompileOptions::default()
             },
         )
         .expect_err("strict namespace mode rejects the imported duplicate");

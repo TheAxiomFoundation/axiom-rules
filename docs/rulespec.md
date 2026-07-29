@@ -56,10 +56,15 @@ Supported rule kinds in the current Rust loader:
 - `derived`: entity-scoped scalar or judgment outputs.
 - `data_relation`: executable runtime predicate declarations with
   `data_relation.arity`. An optional `data_relation.arguments` list declares
-  one entity kind per tuple slot, in position order. Every declared kind must
-  occur in the import-merged program closure, and the list length must equal
-  the arity. Omitting the list leaves a legacy relation untyped. Dataset
-  relation records use durable ids such as
+  one proposed entity kind per tuple slot, in source position order. The list
+  length must equal the arity; that mismatch is always a compile error.
+  Usable entity-kind labels are ASCII UpperCamelCase/alphanumeric. A
+  shape-failing declaration warns in compatibility mode and is treated as
+  undeclared (`slot_entities` remains empty). A well-shaped kind absent from
+  the import-merged program closure also warns, but remains carried verbatim
+  because published modules legitimately declare relation-only kinds.
+  Omitting the list leaves a legacy relation untyped. Dataset relation records
+  use durable ids such as
   `us:statutes/7/2012/j#relation.member_of_household`.
 - `derived_relation`: executable runtime predicates computed by filtering a
   source relation with a judgment formula. This supports filtered membership
@@ -104,9 +109,22 @@ rules:
 ```
 
 Compiled artifacts carry declared argument kinds as
-`program.relations[].slot_entities`. During dataset binding, the engine derives
-an opaque entity id's kind from dataset input records that carry both
-`entity_id` and `entity`. A known mismatch emits
+`program.relations[].slot_entities`. Rust callers can promote relation argument
+shape/closure warnings to errors at compile time with:
+
+```rust
+CompiledProgramArtifact::from_rulespec_str_with_options(
+    source,
+    CompileOptions {
+        strict_relation_entities: true,
+        ..CompileOptions::default()
+    },
+)
+```
+
+This compile option is independent of binding strictness. During dataset
+binding, the engine derives an opaque entity id's kind from dataset input
+records that carry both `entity_id` and `entity`. A known mismatch emits
 `warning[relation_slot_entity_mismatch]` by default; ids absent from the input
 records, or ids used with more than one kind, remain unknown and are skipped.
 Rust callers can promote these warnings to errors with

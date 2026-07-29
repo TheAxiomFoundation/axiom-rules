@@ -2,7 +2,7 @@ use axiom_rules_engine::api::{
     ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
 };
 use axiom_rules_engine::compile::{
-    CompileError, CompiledProgramArtifact, compile_program_file_to_json,
+    CompileError, CompileOptions, CompiledProgramArtifact, compile_program_file_to_json,
 };
 use axiom_rules_engine::rulespec::{
     CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
@@ -2061,9 +2061,8 @@ rules:
 }
 
 #[test]
-fn rulespec_accepts_the_staged_legacy_same_person_role_labels() {
-    let artifact = CompiledProgramArtifact::from_rulespec_str(
-        r#"
+fn rulespec_legacy_role_labels_warn_and_leave_relation_untyped_by_default() {
+    let rulespec = r#"
 format: rulespec/v1
 rules:
   - name: member_of_individuals_household
@@ -2078,20 +2077,47 @@ rules:
     versions:
       - effective_from: 2026-01-01
         formula: "1"
-"#,
-    )
-    .expect("the exact staged legacy role labels remain compatible");
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("legacy role labels remain compile-compatible by default");
 
-    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    let json = serde_json::to_value(&artifact).expect("artifact serializes");
     assert_eq!(
         json["program"]["relations"][0]["slot_entities"],
-        serde_json::json!(["Person", "Person"])
+        serde_json::Value::Null,
+        "shape-failing role labels are unusable as entity metadata"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    let diagnostic = &artifact.diagnostics[0];
+    assert_eq!(diagnostic.code, "invalid_relation_argument_entity_shape");
+    assert_eq!(diagnostic.path, "<memory>");
+    assert!(
+        diagnostic
+            .message
+            .contains("member_of_individuals_household")
+    );
+    assert!(diagnostic.message.contains("individual"));
+    assert!(diagnostic.message.contains("household_member"));
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        rulespec,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects legacy role labels");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid_relation_argument_entity_shape"),
+        "{error}"
     );
 }
 
 #[test]
-fn rulespec_rejects_lowercase_relation_argument_typos() {
-    let error = CompiledProgramArtifact::from_rulespec_str(
+fn rulespec_lowercase_relation_argument_typos_warn_and_leave_relation_untyped() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
         r#"
 format: rulespec/v1
 rules:
@@ -2109,11 +2135,20 @@ rules:
         formula: "1"
 "#,
     )
-    .expect_err("lowercase typos must not be mistaken for legacy role labels");
-    let message = error.to_string();
+    .expect("lowercase typos remain compile-compatible under the warning ratchet");
+    assert!(
+        artifact.program.relations[0].slot_entities.is_empty(),
+        "shape-failing labels must be treated as undeclared"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    assert_eq!(
+        artifact.diagnostics[0].code,
+        "invalid_relation_argument_entity_shape"
+    );
+    let message = artifact.diagnostics[0].to_string();
     assert!(message.contains("member_of_household"), "{message}");
     assert!(message.contains("persno"), "{message}");
-    assert!(message.contains("Person"), "{message}");
+    assert!(message.contains("houshold"), "{message}");
 }
 
 #[test]
@@ -2397,8 +2432,7 @@ rules:
 
 #[test]
 fn rulespec_rejects_data_relation_argument_count_that_differs_from_arity() {
-    let error = CompiledProgramArtifact::from_rulespec_str(
-        r#"
+    let rulespec = r#"
 format: rulespec/v1
 rules:
   - name: qualifying_child_of_tax_unit
@@ -2413,22 +2447,29 @@ rules:
     versions:
       - effective_from: 2026-01-01
         formula: "1"
-"#,
-    )
-    .expect_err("declared relation entity kinds must match arity");
-    let message = error.to_string();
-    assert!(
-        message.contains("qualifying_child_of_tax_unit"),
-        "{message}"
-    );
-    assert!(message.contains("arity 2"), "{message}");
-    assert!(message.contains("1 argument"), "{message}");
+"#;
+    for options in [
+        CompileOptions::default(),
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    ] {
+        let error = CompiledProgramArtifact::from_rulespec_str_with_options(rulespec, options)
+            .expect_err("declared relation entity kinds must match arity in every mode");
+        let message = error.to_string();
+        assert!(
+            message.contains("qualifying_child_of_tax_unit"),
+            "{message}"
+        );
+        assert!(message.contains("arity 2"), "{message}");
+        assert!(message.contains("1 argument"), "{message}");
+    }
 }
 
 #[test]
-fn rulespec_rejects_unknown_data_relation_argument_entity_kind() {
-    let error = CompiledProgramArtifact::from_rulespec_str(
-        r#"
+fn rulespec_unknown_data_relation_argument_entity_kind_warns_by_default_and_is_strict() {
+    let rulespec = r#"
 format: rulespec/v1
 rules:
   - name: qualifying_child_of_tax_unit
@@ -2450,10 +2491,20 @@ rules:
     versions:
       - effective_from: 2026-01-01
         formula: "1"
-"#,
-    )
-    .expect_err("unknown relation entity kinds must fail compilation");
-    let message = error.to_string();
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("unknown but well-shaped entity kinds warn by default");
+    assert_eq!(
+        artifact.program.relations[0].slot_entities,
+        vec!["TaxUnit", "Persno"],
+        "source-valid labels retain exact artifact fidelity"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    assert_eq!(
+        artifact.diagnostics[0].code,
+        "unknown_relation_argument_entity"
+    );
+    let message = artifact.diagnostics[0].to_string();
     assert!(
         message.contains("qualifying_child_of_tax_unit"),
         "{message}"
@@ -2461,6 +2512,102 @@ rules:
     assert!(message.contains("Persno"), "{message}");
     assert!(message.contains("Person"), "{message}");
     assert!(message.contains("TaxUnit"), "{message}");
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        rulespec,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects unknown kinds");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown_relation_argument_entity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn closure_absent_published_relation_kinds_compile_with_warnings_by_default() {
+    let cases = [
+        (
+            "member_of_budgetary_unit",
+            "Person",
+            "Person",
+            "Household",
+            "Household",
+        ),
+        (
+            "pays_received_to_date_by_person",
+            "Person",
+            "Person",
+            "Payment",
+            "Payment",
+        ),
+        (
+            "coverage_months",
+            "TaxUnit",
+            "TaxUnit",
+            "CoverageMonth",
+            "CoverageMonth",
+        ),
+        (
+            "capital_asset_beneficial_interest_holders",
+            "Asset",
+            "Person",
+            "Asset",
+            "Person",
+        ),
+        (
+            "income_component_of_taxpayer",
+            "Person",
+            "Payment",
+            "Person",
+            "Payment",
+        ),
+    ];
+
+    for (relation, closure_kind, first_kind, second_kind, absent_kind) in cases {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: {relation}
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [{first_kind}, {second_kind}]
+  - name: closure_marker
+    kind: derived
+    entity: {closure_kind}
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#
+        );
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&rulespec)
+            .unwrap_or_else(|error| panic!("{relation} must compile by default: {error}"));
+        assert_eq!(
+            artifact.program.relations[0].slot_entities,
+            vec![first_kind, second_kind],
+            "{relation} must retain its exact declaration"
+        );
+        assert_eq!(
+            artifact
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unknown_relation_argument_entity")
+                .count(),
+            1,
+            "{relation} must report its absent closure kind"
+        );
+        let warning = artifact.diagnostics[0].to_string();
+        assert!(warning.contains(relation), "{warning}");
+        assert!(warning.contains(absent_kind), "{warning}");
+    }
 }
 
 #[test]
