@@ -2061,7 +2061,7 @@ rules:
 }
 
 #[test]
-fn rulespec_legacy_role_labels_use_the_closures_only_entity_kind() {
+fn rulespec_accepts_the_staged_legacy_same_person_role_labels() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(
         r#"
 format: rulespec/v1
@@ -2080,13 +2080,40 @@ rules:
         formula: "1"
 "#,
     )
-    .expect("unambiguous legacy role labels remain compatible");
+    .expect("the exact staged legacy role labels remain compatible");
 
     let json = serde_json::to_value(artifact).expect("artifact serializes");
     assert_eq!(
         json["program"]["relations"][0]["slot_entities"],
         serde_json::json!(["Person", "Person"])
     );
+}
+
+#[test]
+fn rulespec_rejects_lowercase_relation_argument_typos() {
+    let error = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [persno, houshold]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect_err("lowercase typos must not be mistaken for legacy role labels");
+    let message = error.to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("persno"), "{message}");
+    assert!(message.contains("Person"), "{message}");
 }
 
 #[test]

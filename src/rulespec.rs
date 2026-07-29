@@ -2170,22 +2170,14 @@ impl RulesDocument {
             }
 
             let mut slot_entities = data_relation.arguments.clone();
-            let legacy_role_labels = slot_entities
-                .iter()
-                .all(|argument| !known.contains(argument) && is_legacy_relation_role(argument));
-            if legacy_role_labels && known.len() == 1 {
-                // One staged pre-contract module used lower_snake_case role
-                // labels (`individual`, `household_member`) rather than entity
-                // kinds. When the closure has exactly one kind, its intended
-                // same-kind relation is unambiguous; canonicalize to that sole
-                // authority. With zero or multiple kinds we fail below rather
-                // than guess. PascalCase typos also fail rather than entering
-                // this narrowly-scoped compatibility path.
-                let sole_kind = known
-                    .first()
-                    .expect("a one-element set has a first item")
-                    .clone();
-                slot_entities.fill(sole_kind);
+            if rule.name == "member_of_individuals_household"
+                && slot_entities == ["individual", "household_member"]
+            {
+                // One staged pre-contract module used role labels rather than
+                // entity kinds for this exact same-Person relation. Keep that
+                // historical spelling readable without turning arbitrary
+                // lower_snake_case typos into accepted entity aliases.
+                slot_entities = vec!["Person".to_string(), "Person".to_string()];
             }
 
             if let Some(argument) = slot_entities
@@ -2767,16 +2759,6 @@ fn unit_kinds_equal(left: &crate::spec::UnitKindSpec, right: &crate::spec::UnitK
         }
         _ => false,
     }
-}
-
-fn is_legacy_relation_role(value: &str) -> bool {
-    value
-        .bytes()
-        .next()
-        .is_some_and(|byte| byte.is_ascii_lowercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn unit_kind_label(kind: &crate::spec::UnitKindSpec) -> String {
