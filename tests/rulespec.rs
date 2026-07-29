@@ -10,8 +10,9 @@ use axiom_rules_engine::rulespec::{
     lower_rulespec_str_with_options,
 };
 use axiom_rules_engine::spec::{
-    DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
-    ScalarExprSpec, ScalarValueSpec, SpecError, UnitKindSpec,
+    DatasetBindingDiagnosticCode, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, RelationRecordSpec, ScalarExprSpec,
+    ScalarValueSpec, SpecError, UnitKindSpec,
 };
 use std::fs;
 use std::path::Path;
@@ -2119,6 +2120,251 @@ rules:
     assert_eq!(
         json["program"]["relations"][0]["slot_entities"],
         serde_json::json!(["Scalar"])
+    );
+}
+
+#[test]
+fn relation_slot_entity_mismatch_warns_by_default_and_errors_in_strict_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#,
+    )
+    .expect("typed relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "household_value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["household-1".to_string(), "person-1".to_string()],
+            interval,
+        }],
+    };
+
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("default binding keeps mismatched records under the warning ratchet");
+    assert_eq!(
+        outcome.dataset.relations[0].tuple,
+        vec!["household-1", "person-1"],
+        "default mode must diagnose without rewriting or dropping the tuple"
+    );
+    assert_eq!(outcome.diagnostics.len(), 2);
+    assert_eq!(
+        outcome.diagnostics[0].code,
+        DatasetBindingDiagnosticCode::RelationSlotEntityMismatch
+    );
+    assert_eq!(outcome.diagnostics[0].relation, "member_of_household");
+    assert_eq!(outcome.diagnostics[0].slot, 0);
+    assert_eq!(outcome.diagnostics[0].entity_id, "household-1");
+    assert_eq!(outcome.diagnostics[0].expected_entity, "Person");
+    assert_eq!(outcome.diagnostics[0].actual_entity, "Household");
+    assert!(
+        outcome.diagnostics[0]
+            .to_string()
+            .contains("strict relation entity mode")
+    );
+
+    let error = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect_err("strict binding rejects the same mismatched tuple");
+    assert!(matches!(
+        &error,
+        SpecError::StrictDatasetBindingDiagnostics(report)
+            if report.diagnostics == outcome.diagnostics
+    ));
+    let message = error.to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("household-1"), "{message}");
+    assert!(message.contains("expected `Person`"), "{message}");
+    assert!(message.contains("found `Household`"), "{message}");
+}
+
+#[test]
+fn relation_slot_entity_validation_skips_unknown_and_ambiguous_ids() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: value
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: value
+"#,
+    )
+    .expect("typed relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "ambiguous-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "ambiguous-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["ambiguous-1".to_string(), "not-in-inputs".to_string()],
+            interval,
+        }],
+    };
+
+    for inputs in [
+        dataset.inputs.clone(),
+        dataset.inputs.iter().cloned().rev().collect(),
+    ] {
+        let outcome = DatasetSpec {
+            inputs,
+            relations: dataset.relations.clone(),
+        }
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect("unknown concrete ID kinds are skipped even in strict mode");
+        assert!(
+            outcome.diagnostics.is_empty(),
+            "ambiguous ID handling must not depend on input order"
+        );
+    }
+}
+
+#[test]
+fn strict_relation_slot_entity_validation_preserves_untyped_legacy_relations() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#,
+    )
+    .expect("legacy untyped relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "household_value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["household-1".to_string(), "person-1".to_string()],
+            interval,
+        }],
+    };
+
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect("strict binding leaves untyped legacy relations compatible");
+    assert!(outcome.diagnostics.is_empty());
+    assert_eq!(
+        outcome.dataset.relations[0].tuple,
+        vec!["household-1", "person-1"]
     );
 }
 

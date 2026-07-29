@@ -37,6 +37,30 @@ rules:
         formula: amount + base_amount
 "#;
 
+const TYPED_RELATION_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#;
+
 #[test]
 fn cli_round_trip_returns_json() {
     let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
@@ -2369,6 +2393,96 @@ fn cli_compile_and_run_compiled_round_trip() {
         ),
         decimal("25")
     );
+
+    std::fs::remove_dir_all(temp_root).ok();
+}
+
+#[test]
+fn run_compiled_emits_relation_slot_entity_warning_to_stderr() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(TYPED_RELATION_RULESPEC)
+        .expect("typed relation RuleSpec compiles");
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("system temp directory has an exact path")
+        .join(format!(
+            "axiom-rules-engine-relation-warning-{}",
+            std::process::id()
+        ));
+    std::fs::create_dir_all(&temp_root).expect("temp dir created");
+    let artifact_path = temp_root.join("typed-relation.compiled.json");
+    artifact
+        .write_json_file(&artifact_path)
+        .expect("artifact writes");
+
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let request = CompiledExecutionRequest {
+        mode: ExecutionMode::Explain,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name: "person_value".to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "person-1".to_string(),
+                    interval: interval.clone(),
+                    value: ScalarValueSpec::Integer { value: 1 },
+                },
+                InputRecordSpec {
+                    name: "household_value".to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: interval.clone(),
+                    value: ScalarValueSpec::Integer { value: 1 },
+                },
+            ],
+            relations: vec![RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["household-1".to_string(), "person-1".to_string()],
+                interval,
+            }],
+        },
+        queries: Vec::new(),
+    };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+        .args([
+            "run-compiled",
+            "--artifact",
+            artifact_path.to_str().expect("utf8 path"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn axiom-rules-engine binary");
+    child
+        .stdin
+        .take()
+        .expect("stdin available")
+        .write_all(
+            serde_json::to_string(&request)
+                .expect("request serialises")
+                .as_bytes(),
+        )
+        .expect("request written");
+    let output = child.wait_with_output().expect("binary completes");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<ExecutionResponse>(&output.stdout)
+        .expect("warning does not contaminate JSON stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning[relation_slot_entity_mismatch]"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("member_of_household"), "{stderr}");
+    assert!(stderr.contains("expected `Person`"), "{stderr}");
+    assert!(stderr.contains("found `Household`"), "{stderr}");
 
     std::fs::remove_dir_all(temp_root).ok();
 }

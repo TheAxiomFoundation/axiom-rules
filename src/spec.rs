@@ -41,6 +41,8 @@ pub enum SpecError {
         arity: usize,
         slot_count: usize,
     },
+    #[error("strict dataset relation entity validation failed:\n{0}")]
+    StrictDatasetBindingDiagnostics(DatasetBindingDiagnosticReport),
     #[error(
         "derived rule `{derived}` declares `rounding: {mode}` but its unit {unit} is not a declared currency unit; output rounding only applies to Currency units (with minor_units)"
     )]
@@ -227,6 +229,78 @@ fn validate_citation_path(location: &str, value: &str) -> Result<(), SpecError> 
     Ok(())
 }
 
+/// Options for binding a wire [`DatasetSpec`] to a compiled [`Program`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DatasetBindingOptions {
+    /// Promote relation tuple entity-kind warnings to a binding error.
+    pub strict_relation_entities: bool,
+}
+
+impl DatasetBindingOptions {
+    pub const fn strict() -> Self {
+        Self {
+            strict_relation_entities: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatasetBindingDiagnosticCode {
+    RelationSlotEntityMismatch,
+}
+
+impl DatasetBindingDiagnosticCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RelationSlotEntityMismatch => "relation_slot_entity_mismatch",
+        }
+    }
+}
+
+/// A relation tuple position whose concrete ID has a known, different kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatasetBindingDiagnostic {
+    pub code: DatasetBindingDiagnosticCode,
+    pub relation: String,
+    pub slot: usize,
+    pub entity_id: String,
+    pub expected_entity: String,
+    pub actual_entity: String,
+}
+
+impl std::fmt::Display for DatasetBindingDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records; strict relation entity mode treats this warning as an error",
+            self.relation, self.slot, self.entity_id, self.expected_entity, self.actual_entity
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatasetBindingDiagnosticReport {
+    pub diagnostics: Vec<DatasetBindingDiagnostic>,
+}
+
+impl std::fmt::Display for DatasetBindingDiagnosticReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            write!(formatter, "{diagnostic}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DatasetBindingOutcome {
+    pub dataset: DataSet,
+    pub diagnostics: Vec<DatasetBindingDiagnostic>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetSpec {
@@ -253,6 +327,17 @@ impl DatasetSpec {
     }
 
     pub fn to_dataset_for_program(&self, program: &Program) -> Result<DataSet, SpecError> {
+        let outcome =
+            self.to_dataset_for_program_with_options(program, DatasetBindingOptions::default())?;
+        emit_dataset_binding_diagnostics(&outcome.diagnostics);
+        Ok(outcome.dataset)
+    }
+
+    pub fn to_dataset_for_program_with_options(
+        &self,
+        program: &Program,
+        options: DatasetBindingOptions,
+    ) -> Result<DatasetBindingOutcome, SpecError> {
         let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
@@ -264,8 +349,75 @@ impl DatasetSpec {
             .iter()
             .map(|relation| relation.to_model_for_program(program))
             .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
-        Ok(DataSet { inputs, relations })
+        let diagnostics = relation_slot_entity_diagnostics(program, &inputs, &relations);
+        if options.strict_relation_entities && !diagnostics.is_empty() {
+            return Err(SpecError::StrictDatasetBindingDiagnostics(
+                DatasetBindingDiagnosticReport { diagnostics },
+            ));
+        }
+        Ok(DatasetBindingOutcome {
+            dataset: DataSet { inputs, relations },
+            diagnostics,
+        })
     }
+}
+
+fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
+    for diagnostic in diagnostics {
+        eprintln!("warning[{}]: {diagnostic}", diagnostic.code.as_str());
+    }
+}
+
+fn relation_slot_entity_diagnostics(
+    program: &Program,
+    inputs: &[InputRecord],
+    relations: &[RelationRecord],
+) -> Vec<DatasetBindingDiagnostic> {
+    // Program schemas say what each slot expects, but program metadata cannot
+    // assign opaque runtime IDs to kinds. Dataset input records are the only
+    // binding-time authority carrying both `entity_id` and `entity`. If an ID
+    // appears under multiple kinds, leave it unknown so validation is
+    // independent of input order and cannot report a false mismatch.
+    let mut entity_by_id = BTreeMap::<String, Option<String>>::new();
+    for input in inputs {
+        entity_by_id
+            .entry(input.entity_id.clone())
+            .and_modify(|known| {
+                if known.as_deref() != Some(input.entity.as_str()) {
+                    *known = None;
+                }
+            })
+            .or_insert_with(|| Some(input.entity.clone()));
+    }
+
+    let mut diagnostics = Vec::new();
+    for record in relations {
+        let schema = program
+            .relations
+            .get(&record.name)
+            .expect("bound relation names resolve to a program schema");
+        if schema.slot_entities.is_empty() {
+            continue;
+        }
+        for (slot, (entity_id, expected_entity)) in
+            record.tuple.iter().zip(&schema.slot_entities).enumerate()
+        {
+            let Some(Some(actual_entity)) = entity_by_id.get(entity_id) else {
+                continue;
+            };
+            if actual_entity != expected_entity {
+                diagnostics.push(DatasetBindingDiagnostic {
+                    code: DatasetBindingDiagnosticCode::RelationSlotEntityMismatch,
+                    relation: record.name.clone(),
+                    slot,
+                    entity_id: entity_id.clone(),
+                    expected_entity: expected_entity.clone(),
+                    actual_entity: actual_entity.clone(),
+                });
+            }
+        }
+    }
+    diagnostics
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
