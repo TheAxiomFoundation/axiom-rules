@@ -5,9 +5,9 @@ without rewriting them. Network access is prohibited.
 
 ## State
 
-Amendments A, B, and the Amendment C census are complete. The default corpus
-result is restored to 40/46, and the amended 26/32 dynamic acceptance check
-passes. Work is moving to final repository gates and independent review.
+Complete. Amendments A, B, and C, all repository gates, the final corpus and
+26/32 reruns, and independent review are complete. The completed report is in
+`out.md`; no push was performed.
 
 ## Done
 
@@ -85,8 +85,23 @@ passes. Work is moving to final repository gates and independent review.
   traversal now carries an optional current kind, retaining the independently
   derived inner `[Payment, Person]` orientation; compile warns on the reversed
   declaration and binding leaves the working tuple warning-free.
+- Final post-review gates:
+  - `cargo test`: 256 passed, zero failed;
+  - schema feature tests: 12 passed, zero failed;
+  - `cargo fmt --all --check`: exit 0;
+  - `cargo check --target wasm32-unknown-unknown --no-default-features`:
+    exit 0;
+  - `cargo clippy --all-targets --all-features`: exit 0;
+  - `git diff --check origin/main...HEAD`: exit 0.
+- Final post-fix corpus rerun remains 40/46 with 39 warning emissions across
+  26 successful invocations and the same six baseline failures.
+- Final fresh 26/32 rerun remains count 1 with zero bind warnings for
+  `[Person, TaxUnit]`, and count 0 with two bind warnings for
+  `[TaxUnit, Person]`.
+- Final focused independent review reports no remaining actionable finding.
+- Wrote the completed report, including all census worklists and numbers, to
+  `out.md`.
 
 ## Next
 
-1. Re-run all repository gates after the review fix.
-2. Finalize this progress log and write the completed report to `out.md`.
+No implementation work remains. Deliver `out.md`; leave the branch unpushed.
