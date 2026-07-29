@@ -624,7 +624,21 @@ fn data_relation_ref_schema() -> Value {
         "type": "object",
         "additionalProperties": true,
         "properties": {
-            "arity": { "type": "integer", "minimum": 0 }
+            "arity": { "type": "integer", "minimum": 0 },
+            "arguments": nullable_array(json!({
+                "oneOf": [
+                    { "type": "string" },
+                    {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "properties": {
+                            "name": { "type": "string" },
+                            "entity": { "type": "string" }
+                        },
+                        "required": ["entity"]
+                    }
+                ]
+            }))
         }
     })
 }

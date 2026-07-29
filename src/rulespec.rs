@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 #[cfg(feature = "fs")]
 use std::fs;
@@ -126,6 +126,15 @@ pub enum RuleSpecError {
     TopLevelArityUnsupported { name: String },
     #[error("RuleSpec data relation `{name}` must declare data_relation.arity")]
     MissingDataRelationArity { name: String },
+    #[error(
+        "RuleSpec data relation `{name}` declares {argument_count} {argument_word}, but has arity {arity}; declare exactly one entity kind per relation slot"
+    )]
+    DataRelationArgumentCountMismatch {
+        name: String,
+        arity: usize,
+        argument_count: usize,
+        argument_word: &'static str,
+    },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation")]
     MissingDerivedRelation { name: String },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation.arity")]
@@ -237,6 +246,14 @@ pub enum RuleSpecError {
         new: usize,
     },
     #[error(
+        "RuleSpec relation `{name}` is declared with conflicting slot entity kinds {existing:?} and {new:?}"
+    )]
+    RelationSlotEntitiesConflict {
+        name: String,
+        existing: Vec<String>,
+        new: Vec<String>,
+    },
+    #[error(
         "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
     )]
     ConflictingUnitDeclarations {
@@ -274,13 +291,24 @@ impl RuleSpecLoweringOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleSpecDiagnosticCode {
     NonExhaustiveMatch,
+    InvalidRelationArgumentEntityShape,
+    UnknownRelationArgumentEntity,
 }
 
 impl RuleSpecDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NonExhaustiveMatch => "non_exhaustive_match",
+            Self::InvalidRelationArgumentEntityShape => "invalid_relation_argument_entity_shape",
+            Self::UnknownRelationArgumentEntity => "unknown_relation_argument_entity",
         }
+    }
+
+    pub const fn is_relation_entity(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidRelationArgumentEntityShape | Self::UnknownRelationArgumentEntity
+        )
     }
 }
 
@@ -295,20 +323,14 @@ pub struct RuleSpecDiagnostic {
     pub path: String,
     pub rule: String,
     pub occurrences: usize,
+    /// Human-readable detail without the path or diagnostic code. Keeping
+    /// those separate lets compiler hosts preserve exact module attribution.
+    pub message: String,
 }
 
 impl fmt::Display for RuleSpecDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let expression = if self.occurrences == 1 {
-            "expression"
-        } else {
-            "expressions"
-        };
-        write!(
-            formatter,
-            "RuleSpec file `{}` rule `{}` has {} non-exhaustive `match` {expression}; add a final `_ => <fallback>` arm to each match",
-            self.path, self.rule, self.occurrences
-        )
+        write!(formatter, "RuleSpec file `{}`: {}", self.path, self.message)
     }
 }
 
@@ -531,10 +553,39 @@ pub struct SourceRef {
     pub url: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum DataRelationArgumentRef {
+    Entity(String),
+    Named { entity: String },
+}
+
+fn deserialize_data_relation_arguments<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let arguments =
+        Option::<Vec<DataRelationArgumentRef>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(arguments
+        .into_iter()
+        .map(|argument| match argument {
+            DataRelationArgumentRef::Entity(entity) | DataRelationArgumentRef::Named { entity } => {
+                entity
+            }
+        })
+        .collect())
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DataRelationRef {
     #[serde(default)]
     pub arity: Option<usize>,
+    /// Proposed entity kind occupying each relation slot. Arity is structural;
+    /// label shape and closure membership are warning-ratcheted validation.
+    /// The object form `{name: ..., entity: ...}` predates the compact string
+    /// form; its descriptive name is discarded while its entity is kept.
+    #[serde(default, deserialize_with = "deserialize_data_relation_arguments")]
+    pub arguments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -856,6 +907,12 @@ fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
     })
+}
+
+fn is_relation_entity_kind_label(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_uppercase())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric())
 }
 
 pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
@@ -1877,12 +1934,7 @@ impl RulesDocument {
         &self,
         options: RuleSpecLoweringOptions,
     ) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
-        let diagnostics = self.compatibility_diagnostics()?;
-        if options.strict && !diagnostics.is_empty() {
-            return Err(RuleSpecError::StrictDiagnostics(RuleSpecDiagnosticReport {
-                diagnostics,
-            }));
-        }
+        let mut diagnostics = self.compatibility_diagnostics()?;
         if !self.relations.is_empty() {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
         }
@@ -1993,6 +2045,8 @@ impl RulesDocument {
                 .retain(|parameter| !table_parameter_names.contains(&parameter.name));
             program.parameters.extend(table_parameters);
         }
+        diagnostics
+            .extend(self.validate_data_relation_arguments(&mut explicit_relations, &program)?);
         self.apply_rule_ids(&mut program);
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
@@ -2002,6 +2056,11 @@ impl RulesDocument {
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
+        if options.strict && !diagnostics.is_empty() {
+            return Err(RuleSpecError::StrictDiagnostics(RuleSpecDiagnosticReport {
+                diagnostics,
+            }));
+        }
         Ok(RuleSpecLoweringOutcome {
             program,
             diagnostics,
@@ -2023,6 +2082,11 @@ impl RulesDocument {
                 }
             }
             if occurrences > 0 {
+                let expression = if occurrences == 1 {
+                    "expression"
+                } else {
+                    "expressions"
+                };
                 diagnostics.push(RuleSpecDiagnostic {
                     code: RuleSpecDiagnosticCode::NonExhaustiveMatch,
                     path: rule
@@ -2031,6 +2095,10 @@ impl RulesDocument {
                         .unwrap_or_else(|| "<memory>".to_string()),
                     rule: rule.name.clone(),
                     occurrences,
+                    message: format!(
+                        "RuleSpec rule `{}` has {occurrences} non-exhaustive `match` {expression}; add a final `_ => <fallback>` arm to each match",
+                        rule.name
+                    ),
                 });
             }
         }
@@ -2052,6 +2120,118 @@ impl RulesDocument {
             declarations.entry(&unit.name).or_insert(&unit.kind);
         }
         Ok(())
+    }
+
+    fn validate_data_relation_arguments(
+        &self,
+        relations: &mut [RelationSpec],
+        lowered_program: &ProgramSpec,
+    ) -> Result<Vec<RuleSpecDiagnostic>, RuleSpecError> {
+        // The engine deliberately has no global entity-kind registry. The
+        // authority here is the import-merged RuleSpec closure: every
+        // top-level `entity:` field survives in `self.rules`, including kinds
+        // on declarations whose later IR omits the field. We union those with
+        // the actually lowered derived entities. Absence from this authority
+        // is advisory because published modules legitimately use relation-only
+        // kinds; arity remains the sole structural argument error.
+        let mut known = self
+            .rules
+            .iter()
+            .filter_map(|rule| rule.entity.as_deref())
+            .filter(|entity| !entity.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        known.extend(
+            lowered_program
+                .derived
+                .iter()
+                .map(|derived| derived.entity.clone()),
+        );
+        let known_label = if known.is_empty() {
+            "<none>".to_string()
+        } else {
+            known.iter().cloned().collect::<Vec<_>>().join(", ")
+        };
+        let mut diagnostics = Vec::new();
+
+        for rule in &self.rules {
+            if !matches!(rule.kind, Some(RuleKind::DataRelation)) {
+                continue;
+            }
+            let Some(data_relation) = rule.data_relation.as_ref() else {
+                continue;
+            };
+            if data_relation.arguments.is_empty() {
+                // Empty is the explicit legacy/undeclared representation.
+                continue;
+            }
+            let arity =
+                data_relation
+                    .arity
+                    .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
+                        name: rule.name.clone(),
+                    })?;
+            if data_relation.arguments.len() != arity {
+                let argument_count = data_relation.arguments.len();
+                return Err(RuleSpecError::DataRelationArgumentCountMismatch {
+                    name: rule.name.clone(),
+                    arity,
+                    argument_count,
+                    argument_word: if argument_count == 1 {
+                        "argument"
+                    } else {
+                        "arguments"
+                    },
+                });
+            }
+
+            let invalid_labels = data_relation
+                .arguments
+                .iter()
+                .filter(|argument| !is_relation_entity_kind_label(argument))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !invalid_labels.is_empty() {
+                diagnostics.push(RuleSpecDiagnostic {
+                    code: RuleSpecDiagnosticCode::InvalidRelationArgumentEntityShape,
+                    path: rule.source_path(),
+                    rule: rule.name.clone(),
+                    occurrences: invalid_labels.len(),
+                    message: format!(
+                        "RuleSpec data relation `{}` declares argument labels {:?}, which are not usable UpperCamelCase entity kinds; the declaration is treated as undeclared and `slot_entities` is left empty. Strict relation entity mode treats this warning as an error",
+                        rule.name, invalid_labels
+                    ),
+                });
+                continue;
+            }
+
+            let unknown_labels = data_relation
+                .arguments
+                .iter()
+                .filter(|argument| !known.contains(*argument))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unknown_labels.is_empty() {
+                diagnostics.push(RuleSpecDiagnostic {
+                    code: RuleSpecDiagnosticCode::UnknownRelationArgumentEntity,
+                    path: rule.source_path(),
+                    rule: rule.name.clone(),
+                    occurrences: unknown_labels.len(),
+                    message: format!(
+                        "RuleSpec data relation `{}` declares entity kinds {:?} that do not occur in the import-merged program closure (known: {known_label}); the exact declaration is retained. Strict relation entity mode treats this warning as an error",
+                        rule.name, unknown_labels
+                    ),
+                });
+            }
+
+            let relation_name = rule.canonical_relation_id();
+            let relation = relations
+                .iter_mut()
+                .find(|relation| relation.name == relation_name)
+                .expect("every data relation rule was lowered before validation");
+            relation.slot_entities = data_relation.arguments.clone();
+        }
+        Ok(diagnostics)
     }
 
     fn apply_rule_ids(&self, program: &mut ProgramSpec) {
@@ -2278,16 +2458,23 @@ impl RuleDefinition {
     }
 
     fn to_data_relation_spec(&self) -> Result<RelationSpec, RuleSpecError> {
-        let arity = self
-            .data_relation
-            .as_ref()
-            .and_then(|data_relation| data_relation.arity)
+        let data_relation =
+            self.data_relation
+                .as_ref()
+                .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
+                    name: self.name.clone(),
+                })?;
+        let arity = data_relation
+            .arity
             .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
                 name: self.name.clone(),
             })?;
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
+            // Filled only after arity and label-shape validation. In
+            // particular, legacy role labels must not leak into artifacts.
+            slot_entities: Vec::new(),
             derivation: None,
         })
     }
@@ -2341,6 +2528,7 @@ impl RuleDefinition {
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
+            slot_entities: derived_relation.slot_entities.clone(),
             derivation: Some(RelationDerivationSpec {
                 source_relation,
                 current_slot: derived_relation
@@ -2656,6 +2844,17 @@ fn append_missing_relations(
                     existing: existing.arity,
                     new: relation.arity,
                 });
+            }
+            if !relation.slot_entities.is_empty() {
+                if existing.slot_entities.is_empty() {
+                    existing.slot_entities = relation.slot_entities.clone();
+                } else if existing.slot_entities != relation.slot_entities {
+                    return Err(RuleSpecError::RelationSlotEntitiesConflict {
+                        name: relation.name.clone(),
+                        existing: existing.slot_entities.clone(),
+                        new: relation.slot_entities.clone(),
+                    });
+                }
             }
             if existing.derivation.is_none() && relation.derivation.is_some() {
                 existing.derivation = relation.derivation.clone();

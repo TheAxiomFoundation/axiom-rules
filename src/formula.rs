@@ -1294,6 +1294,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         program.relations.push(RelationSpec {
             name,
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         });
     }
@@ -1301,19 +1302,15 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
     Ok(program)
 }
 
-/// Slot convention for two-slot relations referenced from aggregations.
-/// Names of the form `X_of_Y` (or `X_of_a_Y` …) read as "X belongs to Y",
-/// so slot 0 = X (related item being iterated) and slot 1 = Y (the
-/// enclosing / current entity). Any other naming is assumed to put the
-/// enclosing entity at slot 0 and the related item at slot 1.
+/// Legacy slot convention for two-slot relations referenced from aggregations.
+///
+/// Formula lowering has no entity-kind context, so it cannot infer direction
+/// from a relation's declared argument entities here. RuleSpec later carries
+/// those declarations into the relation schema, but changing this convention
+/// would also require a compatibility strategy for existing dataset tuples.
 fn infer_slots(_relation: &str) -> (usize, usize) {
-    // Default slot convention: current entity is slot 1, related item is
-    // slot 0. Matches how every existing YAML RuleSpec module declares its
-    // relations (adult_of_benefit_unit, child_of_claim, cb_receipt,
-    // liable_person, associate_of, council_notice_of_tenancy, …). A
-    // RuleSpec module that needs the opposite orientation should rename the
-    // relation to put the enclosing entity last (e.g.
-    // `disposal_of_applicant` rather than `applicant_disposal`).
+    // Preserve the established runtime convention: current entity in slot 1,
+    // related entity in slot 0.
     (1, 0)
 }
 

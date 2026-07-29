@@ -967,6 +967,12 @@
         },
         "name": {
           "type": "string"
+        },
+        "slot_entities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

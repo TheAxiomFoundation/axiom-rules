@@ -294,6 +294,61 @@ fn in_memory_module_source_compiles_and_executes_without_filesystem() {
 }
 
 #[test]
+fn relation_argument_entities_are_validated_against_the_imported_closure() {
+    let source = InMemoryModuleSource::new(&[
+        (
+            "us:policies/root",
+            r#"
+format: rulespec/v1
+imports:
+  - us:policies/entities
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+"#,
+        ),
+        (
+            "us:policies/entities",
+            r#"
+format: rulespec/v1
+rules:
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+        ),
+    ]);
+
+    let artifact = CompiledProgramArtifact::from_rulespec_with_source("us:policies/root", &source)
+        .expect("relation kinds may be declared by imported rules in the closure");
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    let relation = json["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "us:policies/root#relation.member_of_household")
+        .expect("root relation is present");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["Person", "Household"])
+    );
+}
+
+#[test]
 fn source_relation_sets_bind_state_parameter_into_federal_formula() {
     let source = InMemoryModuleSource::new(&[
         (

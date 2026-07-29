@@ -21,6 +21,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: medical_deduction
     kind: derived
     entity: Household
@@ -54,7 +55,16 @@ Supported rule kinds in the current Rust loader:
   every `values` table. Formulas reference them with `table_name[index_expr]`.
 - `derived`: entity-scoped scalar or judgment outputs.
 - `data_relation`: executable runtime predicate declarations with
-  `data_relation.arity`. Dataset relation records use durable ids such as
+  `data_relation.arity`. An optional `data_relation.arguments` list declares
+  one proposed entity kind per tuple slot, in source position order. The list
+  length must equal the arity; that mismatch is always a compile error.
+  Usable entity-kind labels are ASCII UpperCamelCase/alphanumeric. A
+  shape-failing declaration warns in compatibility mode and is treated as
+  undeclared (`slot_entities` remains empty). A well-shaped kind absent from
+  the import-merged program closure also warns, but remains carried verbatim
+  because published modules legitimately declare relation-only kinds.
+  Omitting the list leaves a legacy relation untyped. Dataset relation records
+  use durable ids such as
   `us:statutes/7/2012/j#relation.member_of_household`.
 - `derived_relation`: executable runtime predicates computed by filtering a
   source relation with a judgment formula. This supports filtered membership
@@ -95,7 +105,45 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
 ```
+
+Compiled artifacts carry declared argument kinds as
+`program.relations[].slot_entities`. The compiler separately derives the
+orientation that executable `count_related`, `sum_related`, and membership
+nodes use. If that orientation disagrees with the declaration, compilation
+emits `warning[relation_orientation_mismatch]` naming both orders and a citing
+rule. The serialized declaration remains verbatim for source fidelity.
+
+Rust callers can promote relation argument shape/closure/orientation warnings
+to errors at compile time with:
+
+```rust
+CompiledProgramArtifact::from_rulespec_str_with_options(
+    source,
+    CompileOptions {
+        strict_relation_entities: true,
+        ..CompileOptions::default()
+    },
+)
+```
+
+This compile option is independent of binding strictness. During dataset
+binding, the engine derives an opaque entity id's kind from dataset input
+records that carry both `entity_id` and `entity`. For a relation used by the
+program, expected tuple positions come from executable usage; unresolved or
+conflicting positions are skipped. Only an unused relation falls back to its
+declared position order. This prevents validation from recommending an order
+that the engine indexes as an empty lookup. A known mismatch emits
+`warning[relation_slot_entity_mismatch]` by default; ids absent from input
+records, or ids used with more than one kind, remain unknown and are skipped.
+Rust callers can promote these warnings to errors with
+`DatasetSpec::to_dataset_for_program_with_options(program,
+DatasetBindingOptions::strict())`. The existing
+`DatasetSpec::to_dataset_for_program` entry point retains compatibility mode.
+This strict knob is intentionally on the program-aware binder; lower-level
+callers that construct a `DataSet` or `Engine` directly bypass wire-dataset
+validation.
 
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides

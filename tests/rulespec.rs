@@ -2,7 +2,7 @@ use axiom_rules_engine::api::{
     ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
 };
 use axiom_rules_engine::compile::{
-    CompileError, CompiledProgramArtifact, compile_program_file_to_json,
+    CompileError, CompileOptions, CompiledProgramArtifact, compile_program_file_to_json,
 };
 use axiom_rules_engine::rulespec::{
     CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
@@ -10,7 +10,8 @@ use axiom_rules_engine::rulespec::{
     lower_rulespec_str_with_options,
 };
 use axiom_rules_engine::spec::{
-    DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
+    DatasetBindingDiagnosticCode, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelationRecordSpec,
     ScalarExprSpec, ScalarValueSpec, SpecError, UnitKindSpec,
 };
 use std::fs;
@@ -1947,6 +1948,1066 @@ rules:
         RuleSpecError::MissingDataRelationArity { name }
             if name == "member_of_household"
     ));
+}
+
+#[test]
+fn rulespec_data_relation_arguments_round_trip_through_artifact() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(qualifying_child_of_tax_unit)
+"#,
+    )
+    .expect("declared relation entity kinds compile");
+
+    let json = serde_json::to_value(&artifact).expect("artifact serializes");
+    let relation = json["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "qualifying_child_of_tax_unit")
+        .expect("declared relation is present");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["TaxUnit", "Person"])
+    );
+
+    let reloaded = CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&json).expect("artifact JSON serializes"),
+    )
+    .expect("artifact with declared relation entity kinds reloads");
+    let runtime_program = reloaded
+        .program
+        .to_program()
+        .expect("reloaded artifact builds the runtime model");
+    assert_eq!(
+        runtime_program
+            .relations
+            .get("qualifying_child_of_tax_unit")
+            .expect("runtime relation is present")
+            .slot_entities,
+        vec!["TaxUnit", "Person"]
+    );
+    let round_tripped = serde_json::to_value(reloaded).expect("reloaded artifact serializes");
+    let relation = round_tripped["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "qualifying_child_of_tax_unit")
+        .expect("declared relation survives reload");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["TaxUnit", "Person"])
+    );
+}
+
+#[test]
+fn rulespec_legacy_named_data_relation_arguments_carry_their_entity_kinds() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments:
+        - name: member
+          entity: Person
+        - name: household
+          entity: Household
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect("legacy named relation arguments remain accepted");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Person", "Household"])
+    );
+}
+
+#[test]
+fn rulespec_legacy_role_labels_warn_and_leave_relation_untyped_by_default() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_individuals_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [individual, household_member]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("legacy role labels remain compile-compatible by default");
+
+    let json = serde_json::to_value(&artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::Value::Null,
+        "shape-failing role labels are unusable as entity metadata"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    let diagnostic = &artifact.diagnostics[0];
+    assert_eq!(diagnostic.code, "invalid_relation_argument_entity_shape");
+    assert_eq!(diagnostic.path, "<memory>");
+    assert!(
+        diagnostic
+            .message
+            .contains("member_of_individuals_household")
+    );
+    assert!(diagnostic.message.contains("individual"));
+    assert!(diagnostic.message.contains("household_member"));
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        rulespec,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects legacy role labels");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid_relation_argument_entity_shape"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rulespec_lowercase_relation_argument_typos_warn_and_leave_relation_untyped() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [persno, houshold]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect("lowercase typos remain compile-compatible under the warning ratchet");
+    assert!(
+        artifact.program.relations[0].slot_entities.is_empty(),
+        "shape-failing labels must be treated as undeclared"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    assert_eq!(
+        artifact.diagnostics[0].code,
+        "invalid_relation_argument_entity_shape"
+    );
+    let message = artifact.diagnostics[0].to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("persno"), "{message}");
+    assert!(message.contains("houshold"), "{message}");
+}
+
+#[test]
+fn rulespec_scalar_is_known_only_when_lowering_materializes_it() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: scalar_link
+    kind: data_relation
+    data_relation:
+      arity: 1
+      arguments: [Scalar]
+  - name: base
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: computed_scalar
+    kind: derived
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: base + 1
+"#,
+    )
+    .expect("materialized Scalar pseudo-entity is a known relation kind");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Scalar"])
+    );
+}
+
+const ORIENTATION_MISMATCH_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: eitc_qualifying_child
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: is_eligible
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: case_value
+  - name: eitc_child_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: count_where(qualifying_child_of_tax_unit, eitc_qualifying_child)
+"#;
+
+#[test]
+fn relation_orientation_mismatch_warns_by_default_and_errors_in_strict_compile_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("orientation mismatch is warning-ratcheted by default");
+    assert_eq!(
+        artifact.program.relations[0].slot_entities,
+        vec!["TaxUnit", "Person"],
+        "the artifact must retain source order verbatim"
+    );
+    let diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = diagnostics[0].to_string();
+    assert!(diagnostic.contains("qualifying_child_of_tax_unit"));
+    assert!(diagnostic.contains("[TaxUnit, Person]"));
+    assert!(diagnostic.contains("[Person, TaxUnit]"));
+    assert!(diagnostic.contains("eitc_child_count"));
+
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    let reloaded = CompiledProgramArtifact::from_json_str(&json)
+        .expect("artifact loading recomputes the orientation warning");
+    assert_eq!(
+        reloaded
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+            .count(),
+        1
+    );
+    let reload_error = CompiledProgramArtifact::from_json_str_with_options(
+        &json,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict artifact loading recomputes and rejects the mismatch");
+    assert!(
+        reload_error
+            .to_string()
+            .contains("relation_orientation_mismatch"),
+        "{reload_error}"
+    );
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        ORIENTATION_MISMATCH_RULESPEC,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects executable orientation mismatch");
+    assert!(
+        error.to_string().contains("relation_orientation_mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn derived_relation_membership_contributes_usage_orientation() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+  - name: eligible_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: eligible
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and eligible_member
+"#,
+    )
+    .expect("derived relation orientation mismatch is warning-ratcheted");
+    let diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    let warning = diagnostics[0].to_string();
+    assert!(warning.contains("member_of_household"), "{warning}");
+    assert!(warning.contains("[Household, Person]"), "{warning}");
+    assert!(warning.contains("[Person, Household]"), "{warning}");
+    assert!(warning.contains("snap_unit"), "{warning}");
+}
+
+fn nested_sum_program(outer_slots: &[&str], inner_slots: &[&str]) -> ProgramSpec {
+    serde_json::from_value(serde_json::json!({
+        "relations": [
+            {
+                "name": "member_of_tax_unit",
+                "arity": 2,
+                "slot_entities": outer_slots
+            },
+            {
+                "name": "payment_of_person",
+                "arity": 2,
+                "slot_entities": inner_slots
+            }
+        ],
+        "derived": [
+            {
+                "name": "payment_amount",
+                "entity": "Payment",
+                "dtype": "decimal",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "payment_amount_input"
+                }
+            },
+            {
+                "name": "person_marker",
+                "entity": "Person",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "person_marker_input"
+                }
+            },
+            {
+                "name": "tax_unit_marker",
+                "entity": "TaxUnit",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "tax_unit_marker_input"
+                }
+            },
+            {
+                "name": "qualifying_person_count",
+                "entity": "TaxUnit",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "count_related",
+                    "relation": "member_of_tax_unit",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": {
+                        "kind": "comparison",
+                        "left": {
+                            "kind": "sum_related",
+                            "relation": "payment_of_person",
+                            "current_slot": 1,
+                            "related_slot": 0,
+                            "value": {
+                                "kind": "derived",
+                                "name": "payment_amount"
+                            }
+                        },
+                        "op": "gt",
+                        "right": {
+                            "kind": "literal",
+                            "value": {
+                                "kind": "decimal",
+                                "value": "0"
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .expect("nested aggregate ProgramSpec parses")
+}
+
+fn nested_sum_dataset() -> DatasetSpec {
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_marker_input".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "tax_unit_marker_input".to_string(),
+                entity: "TaxUnit".to_string(),
+                entity_id: "tax-unit".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "payment_amount_input".to_string(),
+                entity: "Payment".to_string(),
+                entity_id: "payment".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Decimal {
+                    value: "10".to_string(),
+                },
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_tax_unit".to_string(),
+                tuple: vec!["person".to_string(), "tax-unit".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "payment_of_person".to_string(),
+                tuple: vec!["payment".to_string(), "person".to_string()],
+                interval,
+            },
+        ],
+    }
+}
+
+#[test]
+fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
+    let artifact = CompiledProgramArtifact::compile(nested_sum_program(
+        &["Person", "TaxUnit"],
+        &["Payment", "Person"],
+    ))
+    .expect("nested aggregate program compiles");
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "relation_orientation_mismatch"),
+        "the Payment rule inside the nested sum must not type the outer Person slot: {:?}",
+        artifact.diagnostics
+    );
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let outcome = nested_sum_dataset()
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+        .expect("working nested aggregate tuple orders bind");
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "both executable tuple orders must remain warning-free: {:?}",
+        outcome.diagnostics
+    );
+}
+
+#[test]
+fn nested_sum_related_retains_partial_orientation_under_untyped_outer_relation() {
+    let artifact =
+        CompiledProgramArtifact::compile(nested_sum_program(&[], &["Person", "Payment"]))
+            .expect("nested aggregate program compiles");
+    let orientation_diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        orientation_diagnostics.len(),
+        1,
+        "the nested sum remains a program use even when its owner kind starts unknown"
+    );
+    let diagnostic = orientation_diagnostics[0].to_string();
+    assert!(diagnostic.contains("payment_of_person"), "{diagnostic}");
+    assert!(diagnostic.contains("[Person, Payment]"), "{diagnostic}");
+    assert!(diagnostic.contains("[Payment, Person]"), "{diagnostic}");
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let outcome = nested_sum_dataset()
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+        .expect("working nested aggregate tuple orders bind");
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "partial usage must prevent declaration fallback from warning on the working inner tuple: {:?}",
+        outcome.diagnostics
+    );
+}
+
+#[test]
+fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("orientation fixture compiles in compatibility mode");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let inputs = vec![
+        InputRecordSpec {
+            name: "is_eligible".to_string(),
+            entity: "Person".to_string(),
+            entity_id: "related-0".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: true },
+        },
+        InputRecordSpec {
+            name: "case_value".to_string(),
+            entity: "TaxUnit".to_string(),
+            entity_id: "case".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Integer { value: 1 },
+        },
+    ];
+    let dataset_with_tuple = |tuple: [&str; 2]| DatasetSpec {
+        inputs: inputs.clone(),
+        relations: vec![RelationRecordSpec {
+            name: "qualifying_child_of_tax_unit".to_string(),
+            tuple: tuple.into_iter().map(str::to_string).collect(),
+            interval: interval.clone(),
+        }],
+    };
+
+    let working = dataset_with_tuple(["related-0", "case"]);
+    let working_outcome = working
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("working order binds");
+    assert!(
+        working_outcome.diagnostics.is_empty(),
+        "the count-producing order must not receive a kind warning"
+    );
+
+    let broken = dataset_with_tuple(["case", "related-0"]);
+    let broken_outcome = broken
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("broken order remains compatible under the warning ratchet");
+    assert_eq!(
+        broken_outcome.diagnostics.len(),
+        2,
+        "both reversed concrete kinds must be diagnosed"
+    );
+    assert_eq!(broken_outcome.diagnostics[0].slot, 0);
+    assert_eq!(broken_outcome.diagnostics[0].expected_entity, "Person");
+    assert_eq!(broken_outcome.diagnostics[0].actual_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[1].slot, 1);
+    assert_eq!(broken_outcome.diagnostics[1].expected_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[1].actual_entity, "Person");
+}
+
+#[test]
+fn relation_slot_entity_mismatch_warns_by_default_and_errors_in_strict_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#,
+    )
+    .expect("typed relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "household_value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["household-1".to_string(), "person-1".to_string()],
+            interval,
+        }],
+    };
+
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("default binding keeps mismatched records under the warning ratchet");
+    assert_eq!(
+        outcome.dataset.relations[0].tuple,
+        vec!["household-1", "person-1"],
+        "default mode must diagnose without rewriting or dropping the tuple"
+    );
+    assert_eq!(outcome.diagnostics.len(), 2);
+    assert_eq!(
+        outcome.diagnostics[0].code,
+        DatasetBindingDiagnosticCode::RelationSlotEntityMismatch
+    );
+    assert_eq!(outcome.diagnostics[0].relation, "member_of_household");
+    assert_eq!(outcome.diagnostics[0].slot, 0);
+    assert_eq!(outcome.diagnostics[0].entity_id, "household-1");
+    assert_eq!(outcome.diagnostics[0].expected_entity, "Person");
+    assert_eq!(outcome.diagnostics[0].actual_entity, "Household");
+    assert!(
+        outcome.diagnostics[0]
+            .to_string()
+            .contains("strict relation entity mode")
+    );
+
+    let error = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect_err("strict binding rejects the same mismatched tuple");
+    assert!(matches!(
+        &error,
+        SpecError::StrictDatasetBindingDiagnostics(report)
+            if report.diagnostics == outcome.diagnostics
+    ));
+    let message = error.to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("household-1"), "{message}");
+    assert!(message.contains("expected `Person`"), "{message}");
+    assert!(message.contains("found `Household`"), "{message}");
+}
+
+#[test]
+fn relation_slot_entity_validation_skips_unknown_and_ambiguous_ids() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: value
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: value
+"#,
+    )
+    .expect("typed relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "ambiguous-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "ambiguous-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["ambiguous-1".to_string(), "not-in-inputs".to_string()],
+            interval,
+        }],
+    };
+
+    for inputs in [
+        dataset.inputs.clone(),
+        dataset.inputs.iter().cloned().rev().collect(),
+    ] {
+        let outcome = DatasetSpec {
+            inputs,
+            relations: dataset.relations.clone(),
+        }
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect("unknown concrete ID kinds are skipped even in strict mode");
+        assert!(
+            outcome.diagnostics.is_empty(),
+            "ambiguous ID handling must not depend on input order"
+        );
+    }
+}
+
+#[test]
+fn strict_relation_slot_entity_validation_preserves_untyped_legacy_relations() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#,
+    )
+    .expect("legacy untyped relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "household_value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["household-1".to_string(), "person-1".to_string()],
+            interval,
+        }],
+    };
+
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect("strict binding leaves untyped legacy relations compatible");
+    assert!(outcome.diagnostics.is_empty());
+    assert_eq!(
+        outcome.dataset.relations[0].tuple,
+        vec!["household-1", "person-1"]
+    );
+}
+
+#[test]
+fn rulespec_rejects_data_relation_argument_count_that_differs_from_arity() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit]
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+    for options in [
+        CompileOptions::default(),
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    ] {
+        let error = CompiledProgramArtifact::from_rulespec_str_with_options(rulespec, options)
+            .expect_err("declared relation entity kinds must match arity in every mode");
+        let message = error.to_string();
+        assert!(
+            message.contains("qualifying_child_of_tax_unit"),
+            "{message}"
+        );
+        assert!(message.contains("arity 2"), "{message}");
+        assert!(message.contains("1 argument"), "{message}");
+    }
+}
+
+#[test]
+fn rulespec_unknown_data_relation_argument_entity_kind_warns_by_default_and_is_strict() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Persno]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("unknown but well-shaped entity kinds warn by default");
+    assert_eq!(
+        artifact.program.relations[0].slot_entities,
+        vec!["TaxUnit", "Persno"],
+        "source-valid labels retain exact artifact fidelity"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    assert_eq!(
+        artifact.diagnostics[0].code,
+        "unknown_relation_argument_entity"
+    );
+    let message = artifact.diagnostics[0].to_string();
+    assert!(
+        message.contains("qualifying_child_of_tax_unit"),
+        "{message}"
+    );
+    assert!(message.contains("Persno"), "{message}");
+    assert!(message.contains("Person"), "{message}");
+    assert!(message.contains("TaxUnit"), "{message}");
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        rulespec,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects unknown kinds");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown_relation_argument_entity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn closure_absent_published_relation_kinds_compile_with_warnings_by_default() {
+    let cases = [
+        (
+            "member_of_budgetary_unit",
+            "Person",
+            "Person",
+            "Household",
+            "Household",
+        ),
+        (
+            "pays_received_to_date_by_person",
+            "Person",
+            "Person",
+            "Payment",
+            "Payment",
+        ),
+        (
+            "coverage_months",
+            "TaxUnit",
+            "TaxUnit",
+            "CoverageMonth",
+            "CoverageMonth",
+        ),
+        (
+            "capital_asset_beneficial_interest_holders",
+            "Asset",
+            "Person",
+            "Asset",
+            "Person",
+        ),
+        (
+            "income_component_of_taxpayer",
+            "Person",
+            "Payment",
+            "Person",
+            "Payment",
+        ),
+    ];
+
+    for (relation, closure_kind, first_kind, second_kind, absent_kind) in cases {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: {relation}
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [{first_kind}, {second_kind}]
+  - name: closure_marker
+    kind: derived
+    entity: {closure_kind}
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#
+        );
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&rulespec)
+            .unwrap_or_else(|error| panic!("{relation} must compile by default: {error}"));
+        assert_eq!(
+            artifact.program.relations[0].slot_entities,
+            vec![first_kind, second_kind],
+            "{relation} must retain its exact declaration"
+        );
+        assert_eq!(
+            artifact
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unknown_relation_argument_entity")
+                .count(),
+            1,
+            "{relation} must report its absent closure kind"
+        );
+        let warning = artifact.diagnostics[0].to_string();
+        assert!(warning.contains(relation), "{warning}");
+        assert!(warning.contains(absent_kind), "{warning}");
+    }
 }
 
 #[test]

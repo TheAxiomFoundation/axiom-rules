@@ -23,6 +23,30 @@ rules:
         formula: amount + base_amount
 "#;
 
+const RELATION_ARGUMENT_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+
 #[test]
 fn compile_stamps_format_and_engine_versions() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
@@ -134,6 +158,73 @@ fn artifact_file_round_trip_preserves_versions() {
     assert_eq!(reloaded.artifact_format_version, ARTIFACT_FORMAT_VERSION);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn legacy_artifact_without_relation_slot_entities_still_loads() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(RELATION_ARGUMENT_RULESPEC)
+        .expect("RuleSpec relation arguments compile");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    let relation = value["program"]["relations"][0]
+        .as_object_mut()
+        .expect("relation is an object");
+    assert_eq!(
+        relation.remove("slot_entities"),
+        Some(serde_json::json!(["Person", "Household"])),
+        "the new artifact must carry the field before this test makes it legacy-shaped"
+    );
+
+    let loaded = CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&value).expect("legacy-shaped artifact serialises"),
+    )
+    .expect("an artifact without optional relation slot entities still loads");
+    let round_tripped = serde_json::to_value(loaded).expect("loaded artifact serialises");
+    assert!(
+        round_tripped["program"]["relations"][0]
+            .get("slot_entities")
+            .is_none(),
+        "missing slot entities default to undeclared and remain omitted"
+    );
+}
+
+#[test]
+fn artifact_loader_retains_unknown_tolerated_relation_fields() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    value["program"]["relations"] = serde_json::json!([{
+        "name": "member_of_household",
+        "arity": 2,
+        "slot_entities": ["Person", "Household"]
+    }]);
+
+    let loaded = CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&value).expect("probe artifact serialises"),
+    )
+    .expect("format-2 readers tolerate the additive relation field");
+    let round_tripped = serde_json::to_value(loaded).expect("probe artifact reserialises");
+    assert_eq!(
+        round_tripped["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Person", "Household"]),
+        "new readers retain the field older readers safely ignore"
+    );
+}
+
+#[test]
+fn artifact_rejects_relation_slot_entity_count_that_differs_from_arity() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(RELATION_ARGUMENT_RULESPEC)
+        .expect("RuleSpec relation arguments compile");
+    let mut value = serde_json::to_value(artifact).expect("artifact serialises");
+    value["program"]["relations"][0]["slot_entities"] = serde_json::json!(["Person"]);
+
+    let error = CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&value).expect("malformed artifact serialises"),
+    )
+    .expect_err("artifact relation slot kinds must match arity");
+    let message = error.to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("arity 2"), "{message}");
+    assert!(message.contains("1 slot"), "{message}");
 }
 
 #[test]
