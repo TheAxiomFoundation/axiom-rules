@@ -1875,8 +1875,9 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
         // previously wrote by hand. The lowered tree is flat n-ary — one Or
         // over n And branches — where hand-written `and`/`or` chains nest as
         // binary pairs, so the compiled structure is shallower but the
-        // outcomes are identical (the exactly_one integration tests prove
-        // equivalence exhaustively).
+        // outcomes are identical (the exactly_one integration tests check
+        // sugar against the manual expansion over every Boolean assignment
+        // and for short-circuit and missing-input-fault behavior).
         Expr::Call { func, args } => match func.as_str() {
             "exactly_one" => {
                 if args.len() < 2 {

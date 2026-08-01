@@ -1,7 +1,10 @@
-//! `exactly_one(...)` is authoring sugar: it must lower to the same
-//! Or-of-And-of-Nots expansion encoders previously wrote by hand, so the
-//! compiled program, evaluation, and traces are indistinguishable from the
-//! manual form.
+//! `exactly_one(...)` is authoring sugar with a precise contract: it lowers
+//! to an Or-of-And-of-Nots expansion behaving exactly like the form encoders
+//! previously wrote by hand — same outcomes on every Boolean assignment,
+//! same short-circuit reads, and the same missing-input faults when a read
+//! reaches an absent input. The lowered tree is flat n-ary where
+//! hand-chained operators nest as binary pairs, so compiled structure and
+//! trace text render the flatter shape while behavior stays identical.
 
 use axiom_rules_engine::api::{
     ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
@@ -188,6 +191,136 @@ fn exactly_one_matches_the_expansion_on_every_input_combination() {
             JudgmentOutcomeSpec::NotHolds
         };
         assert_eq!(sugared, expected, "wrong outcome at inputs {statuses:?}");
+    }
+}
+
+fn partial_status_dataset(period: &PeriodSpec, supplied: &[(&str, bool)]) -> DatasetSpec {
+    DatasetSpec {
+        inputs: supplied
+            .iter()
+            .map(|(name, value)| InputRecordSpec {
+                name: name.to_string(),
+                entity: "TaxUnit".to_string(),
+                entity_id: "tax-unit-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: *value },
+            })
+            .collect(),
+        relations: vec![],
+    }
+}
+
+fn run_partial(rulespec: &str, supplied: &[(&str, bool)]) -> Result<JudgmentOutcomeSpec, String> {
+    let period = simple_period();
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: partial_status_dataset(&period, supplied),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec!["filing_status_is_valid".to_string()],
+        }],
+    })
+    .map(|response| {
+        judgment_output(
+            response.results[0]
+                .outputs
+                .get("filing_status_is_valid")
+                .expect("judgment output"),
+        )
+    })
+    .map_err(|error| format!("{error:?}"))
+}
+
+#[test]
+fn exactly_one_matches_the_expansion_under_missing_inputs() {
+    // Missing inputs are not a third truth value at this surface: an input
+    // fault fires when a read reaches it, and short-circuiting can resolve a
+    // branch before any missing read happens. The sugar's contract is that
+    // both behaviors track the manual expansion exactly, because the lowered
+    // trees are identical.
+
+    // The first two statuses both hold: every branch short-circuits on one
+    // of them, so the last two statuses are never read and the outcome is
+    // determined with half the inputs absent.
+    let determined = [("status_single", true), ("status_married_separate", true)];
+    let sugared = run_partial(SUGARED_RULESPEC, &determined);
+    let expanded = run_partial(EXPANDED_RULESPEC, &determined);
+    assert_eq!(sugared, expanded, "divergence with inputs {determined:?}");
+    assert_eq!(sugared, Ok(JudgmentOutcomeSpec::NotHolds));
+
+    // Statuses one and three hold: the first branch reads the (absent)
+    // second status before anything can short-circuit, so both forms fault
+    // on the same missing input.
+    let faulting = [("status_single", true), ("status_joint", true)];
+    let sugared = run_partial(SUGARED_RULESPEC, &faulting);
+    let expanded = run_partial(EXPANDED_RULESPEC, &faulting);
+    assert_eq!(sugared, expanded, "divergence with inputs {faulting:?}");
+    let error = sugared.expect_err("unreachable inputs must fault");
+    assert!(
+        error.contains("MissingInput") && error.contains("status_married_separate"),
+        "fault must name the first missing read, got: {error}",
+    );
+
+    // Nothing supplied: both forms fault on the first read.
+    let empty: [(&str, bool); 0] = [];
+    let sugared = run_partial(SUGARED_RULESPEC, &empty);
+    let expanded = run_partial(EXPANDED_RULESPEC, &empty);
+    assert_eq!(sugared, expanded, "divergence with no inputs");
+    let error = sugared.expect_err("empty dataset must fault");
+    assert!(
+        error.contains("MissingInput") && error.contains("status_single"),
+        "fault must name the first missing read, got: {error}",
+    );
+}
+
+const SUGARED_PAIR_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: filing_status_is_valid
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: exactly_one(status_single, status_joint)
+"#;
+
+const EXPANDED_PAIR_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: filing_status_is_valid
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (status_single and not status_joint)
+          or (not status_single and status_joint)
+"#;
+
+#[test]
+fn exactly_one_pair_is_exclusive_or() {
+    // The minimum arity behaves as exclusive-or and matches its expansion.
+    for (single, joint) in [(false, false), (false, true), (true, false), (true, true)] {
+        let supplied = [("status_single", single), ("status_joint", joint)];
+        let sugared = run_partial(SUGARED_PAIR_RULESPEC, &supplied);
+        let expanded = run_partial(EXPANDED_PAIR_RULESPEC, &supplied);
+        assert_eq!(sugared, expanded, "pair divergence at {supplied:?}");
+        let expected = if single ^ joint {
+            JudgmentOutcomeSpec::Holds
+        } else {
+            JudgmentOutcomeSpec::NotHolds
+        };
+        assert_eq!(sugared, Ok(expected), "pair wrong outcome at {supplied:?}");
     }
 }
 
