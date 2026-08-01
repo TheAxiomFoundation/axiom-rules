@@ -275,7 +275,12 @@ A `dtype: Judgment` formula composes:
 - bare Boolean facts (an undeclared name lowers to an input compared against
   `true`);
 - inside `derived_relation` predicate formulas only: relation-predicate
-  names, which lower to membership tests.
+  names, which lower to membership tests;
+- `exactly_one(a, b, ...)` — two or more judgment-position arguments; holds
+  when exactly one holds. Lowers to a flat n-ary or-of-and-of-nots with the
+  same outcomes, short-circuit reads, and missing-input faults as the
+  hand-written expansion — see the mutual-exclusivity section of
+  [rulespec.md](rulespec.md).
 
 Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
