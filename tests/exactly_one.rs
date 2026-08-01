@@ -178,12 +178,7 @@ fn exactly_one_lowers_to_a_flat_or_of_and_of_nots() {
 #[test]
 fn exactly_one_matches_the_expansion_on_every_input_combination() {
     for bits in 0..16u8 {
-        let statuses = [
-            bits & 1 != 0,
-            bits & 2 != 0,
-            bits & 4 != 0,
-            bits & 8 != 0,
-        ];
+        let statuses = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0];
         let sugared = run(SUGARED_RULESPEC, statuses);
         let expanded = run(EXPANDED_RULESPEC, statuses);
         assert_eq!(sugared, expanded, "divergence at inputs {statuses:?}");
