@@ -1,7 +1,8 @@
 # RuleSpec
 
 RuleSpec is the canonical authoring and interchange schema for Axiom Rules
-Engine rules.
+Engine rules. This document covers operational semantics;
+[rulespec-format.md](rulespec-format.md) is the expression-grammar reference.
 Authoring tools should emit RuleSpec YAML/JSON from Axiom source documents; the
 Rust engine normalises it into `ProgramSpec` before compilation. `ProgramSpec` is
 the runtime IR, not a RuleSpec module file format.
