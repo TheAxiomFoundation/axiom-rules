@@ -442,6 +442,28 @@ rules:
         delegation: us:regulations/7-cfr/273/9#snap_state_standard_utility_allowance_delegation
 ```
 
+### Mutual exclusivity: `exactly_one`
+
+Judgment formulas accept `exactly_one(a, b, ...)` (two or more arguments,
+each any judgment-position expression: a fact reference, a comparison, a
+negation). It holds when exactly one argument holds. It lowers to an
+Or-of-And-of-Nots expansion — branch *i* asserts argument *i* and negates the
+rest — with the same truth table as the hand-written form, so outcomes match
+manual expansions on every input. The lowered tree is flat: one n-ary `or`
+over n `and` branches, where hand-chained `and`/`or` operators nest as binary
+pairs, so compiled structure and traces come out shallower than the manual
+form. Prefer it wherever a rule validates a choose-one set, such as filing
+statuses:
+
+```yaml
+versions:
+  - effective_from: '2026-01-01'
+    formula: exactly_one(filing_status_single, filing_status_married_separate, filing_status_joint, filing_status_head_of_household)
+```
+
+replaces the four-branch expansion whose leaf-reference count grows with the
+square of the option count.
+
 ## Currency rounding
 
 A `derived` rule whose `unit` is a currency may declare an output-rounding
