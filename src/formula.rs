@@ -1869,6 +1869,53 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
                 ));
             }
         },
+        // `exactly_one(a, b, ...)` is mutual-exclusivity sugar: it lowers to
+        // an Or-of-And-of-Nots expansion (branch i asserts item i and negates
+        // every other item) with the same truth table as the form encoders
+        // previously wrote by hand. The lowered tree is flat n-ary — one Or
+        // over n And branches — where hand-written `and`/`or` chains nest as
+        // binary pairs, so the compiled structure is shallower but the
+        // outcomes are identical (the exactly_one integration tests check
+        // sugar against the manual expansion over every Boolean assignment
+        // and for short-circuit and missing-input-fault behavior).
+        Expr::Call { func, args } => match func.as_str() {
+            "exactly_one" => {
+                if args.len() < 2 {
+                    return Err(FormulaError::lower(format!(
+                        "exactly_one takes at least 2 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let items = args
+                    .iter()
+                    .map(|arg| lower_to_judgment(arg, ctx))
+                    .collect::<Result<Vec<_>, _>>()?;
+                JudgmentExprSpec::Or {
+                    items: (0..items.len())
+                        .map(|holds| JudgmentExprSpec::And {
+                            items: items
+                                .iter()
+                                .enumerate()
+                                .map(|(position, item)| {
+                                    if position == holds {
+                                        item.clone()
+                                    } else {
+                                        JudgmentExprSpec::Not {
+                                            item: Box::new(item.clone()),
+                                        }
+                                    }
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                }
+            }
+            other => {
+                return Err(FormulaError::lower(format!(
+                    "unknown function `{other}` in judgment position"
+                )));
+            }
+        },
         _ => {
             return Err(FormulaError::lower(format!(
                 "expression shape not supported in judgment position: {:?}",
