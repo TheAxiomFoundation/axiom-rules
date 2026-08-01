@@ -51,7 +51,7 @@ the term as an acronym, spell the words out.
 
 Display surfaces derive labels from fragments by title-casing word by word
 and upper-casing tokens found in an acronym registry. The canonical
-registries are `RULE_NAME_ACRONYMS` in `axiom-foundation.org`
+registries are `RULE_NAME_ACRONYMS` in `axiom.org`
 `src/components/axiom/graph-viewer/citations.ts` and
 `rulespec-graph-viewer` `src/citations.ts`; the app carries further sets
 following the same convention for program labels, breadcrumbs, and document
