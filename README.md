@@ -2,6 +2,11 @@
 
 Rust runtime and Python bindings for executing Axiom RuleSpec.
 
+New to the format? [docs/rulespec-format.md](docs/rulespec-format.md) is the
+expression-grammar reference (rule records, the formula language, operators
+and functions, the lowered vocabulary); [docs/rulespec.md](docs/rulespec.md)
+covers operational semantics (versioning, rounding, provenance).
+
 `axiom-rules-engine` is engine infrastructure only. Production policy content belongs
 in exact country checkouts such as `rulespec-us`, with direct jurisdiction directories
 such as `us/` and `us-co/`; the file path supplies the legal ID. This repo keeps
