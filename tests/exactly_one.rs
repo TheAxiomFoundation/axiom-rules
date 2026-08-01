@@ -244,8 +244,8 @@ fn exactly_one_matches_the_expansion_under_missing_inputs() {
     // Missing inputs are not a third truth value at this surface: an input
     // fault fires when a read reaches it, and short-circuiting can resolve a
     // branch before any missing read happens. The sugar's contract is that
-    // both behaviors track the manual expansion exactly, because the lowered
-    // trees are identical.
+    // both behaviors track the manual expansion exactly, because both forms
+    // read the same inputs in the same order.
 
     // The first two statuses both hold: every branch short-circuits on one
     // of them, so the last two statuses are never read and the outcome is
