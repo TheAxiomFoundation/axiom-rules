@@ -5,6 +5,24 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Prototype temporal-relational Axiom Rules Engine in Rust"
 repository = "https://github.com/TheAxiomFoundation/axiom-rules-engine"
+keywords = ["rules-engine", "rules-as-code", "legal", "policy", "rulespec"]
+# The published crate carries the library, CLI, and format docs only. Tests,
+# fixtures, and the Python wrapper stay repo-only. Generated schemas also stay
+# out (they regenerate via `emit-schemas`) with one exception: the `schema`
+# feature's src/schema.rs include_str!s compiled-artifact.v1.schema.json, so
+# that file must ship or all-features builds (docs.rs included) cannot compile.
+include = [
+    "src/**",
+    "docs/**",
+    "schemas/compiled-artifact.v1.schema.json",
+    "README.md",
+    "LICENSE",
+]
+
+# docs.rs builds default features only unless told otherwise; build the full
+# surface (fs + schema) so the hosted API docs show everything.
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = ["fs"]
