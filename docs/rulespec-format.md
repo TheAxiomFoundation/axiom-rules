@@ -50,8 +50,10 @@ Rule records share these fields:
 - `entity` — the entity kind a `derived` rule is computed for (for example
   `Person`, `Household`, `TaxUnit`).
 - `dtype` — see the data-type table below.
-- `period`, `unit`, `source`, `source_url`, `metadata` — optional; `metadata`
-  carries the proof atoms described in [rulespec.md](rulespec.md).
+- `period`, `unit`, `source`, `source_url` — optional descriptive fields.
+- `metadata` — tolerated and ignored by the engine loader; encoding tooling
+  and validation gates consume it (proof atoms — see
+  [rulespec.md](rulespec.md) on source pinning).
 - `versions` — dated entries. Each version has `effective_from`, an optional
   inclusive `effective_to`, and either a `formula` (expression source) or,
   for indexed parameters, a `values` table.
@@ -78,12 +80,19 @@ constructs, listed below.
 
 ## Identifier resolution
 
-A bare identifier in a formula resolves in this order: a declared rule name
-(parameter or derived), a declared relation predicate, and otherwise a free
-input slot supplied by the caller at execution time. Undeclared names are not
-an error at lowering time — a typo becomes an input the engine then reports
-as missing. Compile queries can surface the resulting input catalog;
-`metadata.input_catalog` on compiled artifacts lists every owner.
+A bare identifier in scalar position resolves in this order: the reserved
+names `period_start` and `period_end` (the evaluation period's bounds), then
+a declared parameter (lowered as a zero-index table lookup), then a declared
+derived rule, and otherwise a free input slot supplied by the caller at
+execution time. In judgment position the order is: a declared judgment
+derived rule, and otherwise a free Boolean input compared against `true`.
+Relation-predicate membership resolution applies only when lowering
+`derived_relation` predicate formulas, not ordinary rules.
+
+Undeclared names are not an error at lowering time — a typo becomes an input
+the engine then reports as missing. Compile queries can surface the
+resulting input catalog; `metadata.input_catalog` on compiled artifacts
+lists every owner.
 
 ## Indexed parameters
 
@@ -130,8 +139,10 @@ chain; parenthesize whenever a formula's grouping matters to a reader):
 | 6 (tightest) | unary `-`, `not` | scalar / judgment |
 
 Literals: integers (`3`), decimals (`0.3`), booleans (`true` / `false`),
-and double-quoted strings. Comments and dates are not part of the expression
-grammar — dates come from inputs, parameters, or the version envelope.
+and double- or single-quoted strings. `#` starts a comment that runs to the
+end of the line. Date literals are not part of the expression grammar —
+dates come from inputs, parameters, the reserved `period_start` /
+`period_end` identifiers, or the version envelope.
 
 ```yaml
 format: rulespec/v1
@@ -202,8 +213,8 @@ rules:
 
 | Function | Arity | Meaning |
 |---|---|---|
-| `max(a, b, ...)` | 1+ | largest argument |
-| `min(a, b, ...)` | 1+ | smallest argument |
+| `max(a, b, ...)` | any | largest argument |
+| `min(a, b, ...)` | any | smallest argument |
 | `ceil(x)` | 1 | round up to an integer |
 | `floor(x)` | 1 | round down to an integer |
 | `days_between(from, to)` | 2 | day count between two dates |
@@ -218,7 +229,10 @@ rules:
 | `sum_top_n_over_periods(x, n)` | 2 | sum the `n` largest per-period values |
 
 The `_where` predicate names a Boolean input or a derived judgment computed
-on the related entity. The `*_over_periods` reductions are meaningful only
+on the related entity. The lowerer enforces the fixed arities (`ceil`,
+`floor`, `days_between`, `date_add_days`, `count_where`, `sum_where`, and
+the reductions); `max` and `min` accept any argument list unchecked,
+including an empty one. The `*_over_periods` reductions are meaningful only
 under the lifetime execution surface; per-period execution paths reject
 them, and an unrecognized `*_over_periods` name fails lowering with an error
 that lists the supported reductions. Any other unknown function name fails
@@ -260,7 +274,8 @@ A `dtype: Judgment` formula composes:
 - references to other judgment-dtype derived rules;
 - bare Boolean facts (an undeclared name lowers to an input compared against
   `true`);
-- relation-predicate names, which lower to membership tests.
+- inside `derived_relation` predicate formulas only: relation-predicate
+  names, which lower to membership tests.
 
 Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
@@ -275,8 +290,8 @@ JSON Schemas give exact field shapes.
 
 Scalar kinds: `literal`, `input`, `input_or_else`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
-`floor`, `date_add_days`, `days_between`, `count_related`, `sum_related`,
-`if`, `over_periods`.
+`floor`, `period_start`, `period_end`, `date_add_days`, `days_between`,
+`count_related`, `sum_related`, `if`, `over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
 `eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`.
