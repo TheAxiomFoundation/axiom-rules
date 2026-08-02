@@ -1197,6 +1197,19 @@ pub enum JudgmentExprSpec {
     Not {
         item: Box<JudgmentExprSpec>,
     },
+    /// Holds when exactly one item holds. First-class in the serialized
+    /// surface so artifacts and graph consumers see one n-input gate;
+    /// `to_model` lowers it to the flat Or-of-And-of-Nots expansion the
+    /// formula sugar produced before this variant existed, so evaluation,
+    /// short-circuit reads, missing-input faults, and trace text are
+    /// unchanged. Outcomes and faults also match hand-written expansions
+    /// on every input; trace TEXT does not match those byte-for-byte,
+    /// because hand-chained and/or nest as binary pairs while this
+    /// lowering is flat n-ary. Expression-level, additive to the
+    /// serialized surface — no artifact-format-version bump.
+    ExactlyOne {
+        items: Vec<JudgmentExprSpec>,
+    },
 }
 
 impl JudgmentExprSpec {
@@ -1230,6 +1243,31 @@ impl JudgmentExprSpec {
                     .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?,
             )),
             Self::Not { item } => Ok(JudgmentExpr::Not(Box::new(item.to_model()?))),
+            Self::ExactlyOne { items } => {
+                let lowered = items
+                    .iter()
+                    .map(JudgmentExprSpec::to_model)
+                    .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?;
+                Ok(JudgmentExpr::Or(
+                    (0..lowered.len())
+                        .map(|holds| {
+                            JudgmentExpr::And(
+                                lowered
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(position, item)| {
+                                        if position == holds {
+                                            item.clone()
+                                        } else {
+                                            JudgmentExpr::Not(Box::new(item.clone()))
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                ))
+            }
         }
     }
 }

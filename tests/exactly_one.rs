@@ -128,7 +128,9 @@ fn run(rulespec: &str, statuses: [bool; 4]) -> JudgmentOutcomeSpec {
 }
 
 #[test]
-fn exactly_one_lowers_to_a_flat_or_of_and_of_nots() {
+fn exactly_one_lowers_to_a_first_class_gate() {
+    // The serialized surface — what artifacts and graph consumers read —
+    // carries one n-input exactly_one node, not the ~n² expansion.
     let program = axiom_rules_engine::rulespec::lower_rulespec_str(SUGARED_RULESPEC)
         .expect("sugared RuleSpec lowers");
     let program = serde_json::to_value(&program).expect("program serialises");
@@ -144,7 +146,6 @@ fn exactly_one_lowers_to_a_flat_or_of_and_of_nots() {
             "right": {"kind": "literal", "value": {"kind": "bool", "value": true}},
         })
     };
-    let not_holds = |name: &str| serde_json::json!({"kind": "not", "item": holds(name)});
     let names = [
         "status_single",
         "status_married_separate",
@@ -152,30 +153,33 @@ fn exactly_one_lowers_to_a_flat_or_of_and_of_nots() {
         "status_head_of_household",
     ];
     let expected = serde_json::json!({
-        "kind": "or",
-        "items": names
-            .iter()
-            .enumerate()
-            .map(|(branch, _)| {
-                serde_json::json!({
-                    "kind": "and",
-                    "items": names
-                        .iter()
-                        .enumerate()
-                        .map(|(position, name)| if position == branch {
-                            holds(name)
-                        } else {
-                            not_holds(name)
-                        })
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect::<Vec<_>>(),
+        "kind": "exactly_one",
+        "items": names.iter().map(|name| holds(name)).collect::<Vec<_>>(),
     });
     assert_eq!(
         expr, &expected,
-        "exactly_one must lower to one flat Or over n And-of-Nots branches",
+        "exactly_one must serialise as one first-class gate with n inputs",
     );
+}
+
+#[test]
+fn structured_exactly_one_yaml_round_trips_and_matches_the_sugar() {
+    // The structured spec surface accepts kind: exactly_one directly, and a
+    // structured judgment behaves identically to the formula sugar.
+    use axiom_rules_engine::spec::JudgmentExprSpec;
+    let yaml = r#"
+kind: exactly_one
+items:
+  - kind: derived
+    name: a
+  - kind: derived
+    name: b
+"#;
+    let parsed: JudgmentExprSpec =
+        serde_yaml::from_str(yaml).expect("structured exactly_one parses");
+    let back = serde_json::to_value(&parsed).expect("re-serialises");
+    assert_eq!(back["kind"], "exactly_one");
+    assert_eq!(back["items"].as_array().map(Vec::len), Some(2));
 }
 
 #[test]

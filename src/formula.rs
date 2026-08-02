@@ -1869,15 +1869,16 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
                 ));
             }
         },
-        // `exactly_one(a, b, ...)` is mutual-exclusivity sugar: it lowers to
-        // an Or-of-And-of-Nots expansion (branch i asserts item i and negates
-        // every other item) with the same truth table as the form encoders
-        // previously wrote by hand. The lowered tree is flat n-ary — one Or
-        // over n And branches — where hand-written `and`/`or` chains nest as
-        // binary pairs, so the compiled structure is shallower but the
-        // outcomes are identical (the exactly_one integration tests check
-        // sugar against the manual expansion over every Boolean assignment
-        // and for short-circuit and missing-input-fault behavior).
+        // `exactly_one(a, b, ...)` lowers to a first-class spec node, so
+        // artifacts and graph consumers carry one n-input gate instead of the
+        // ~n² expansion. The spec's `to_model` performs the same flat
+        // Or-of-And-of-Nots lowering this arm used to do inline, so
+        // evaluation, short-circuit reads, missing-input faults, and trace
+        // text are unchanged from the pre-first-class sugar. Outcomes and
+        // faults also match hand-written expansions on every input (the
+        // exactly_one integration tests check exactly that); trace text does
+        // not match the manual form byte-for-byte, because hand-chained
+        // and/or nest binary while this lowering is flat n-ary.
         Expr::Call { func, args } => match func.as_str() {
             "exactly_one" => {
                 if args.len() < 2 {
@@ -1886,28 +1887,11 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
                         args.len()
                     )));
                 }
-                let items = args
-                    .iter()
-                    .map(|arg| lower_to_judgment(arg, ctx))
-                    .collect::<Result<Vec<_>, _>>()?;
-                JudgmentExprSpec::Or {
-                    items: (0..items.len())
-                        .map(|holds| JudgmentExprSpec::And {
-                            items: items
-                                .iter()
-                                .enumerate()
-                                .map(|(position, item)| {
-                                    if position == holds {
-                                        item.clone()
-                                    } else {
-                                        JudgmentExprSpec::Not {
-                                            item: Box::new(item.clone()),
-                                        }
-                                    }
-                                })
-                                .collect(),
-                        })
-                        .collect(),
+                JudgmentExprSpec::ExactlyOne {
+                    items: args
+                        .iter()
+                        .map(|arg| lower_to_judgment(arg, ctx))
+                        .collect::<Result<Vec<_>, _>>()?,
                 }
             }
             other => {

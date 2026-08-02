@@ -1130,7 +1130,9 @@ fn collect_fast_blockers_from_judgment_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, right, blockers);
         }
         JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => {}
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 collect_fast_blockers_from_judgment_expr(derived_name, item, blockers);
             }
@@ -1354,7 +1356,9 @@ fn collect_judgment_dependencies(
             dependencies.insert(name.clone());
         }
         JudgmentExprSpec::RelationMember { .. } => {}
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 collect_judgment_dependencies(item, dependencies, relation_dependencies);
             }
@@ -1450,7 +1454,9 @@ fn collect_relation_members_from_judgment(
         JudgmentExprSpec::RelationMember { relation, .. } => {
             relations.insert(relation.clone());
         }
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 collect_relation_members_from_judgment(item, relations);
             }
