@@ -277,10 +277,11 @@ A `dtype: Judgment` formula composes:
 - inside `derived_relation` predicate formulas only: relation-predicate
   names, which lower to membership tests;
 - `exactly_one(a, b, ...)` — two or more judgment-position arguments; holds
-  when exactly one holds. Lowers to a flat n-ary or-of-and-of-nots with the
-  same outcomes, short-circuit reads, and missing-input faults as the
-  hand-written expansion — see the mutual-exclusivity section of
-  [rulespec.md](rulespec.md).
+  when exactly one holds. Serialises as a first-class `exactly_one` node
+  (one n-input gate in artifacts and graphs); evaluation lowers it to the
+  or-of-and-of-nots expansion, keeping outcomes, short-circuit reads, and
+  missing-input faults identical to the hand-written form — see the
+  mutual-exclusivity section of [rulespec.md](rulespec.md).
 
 Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
@@ -299,7 +300,8 @@ Scalar kinds: `literal`, `input`, `input_or_else`, `derived`,
 `count_related`, `sum_related`, `if`, `over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
-`eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`.
+`eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`,
+`exactly_one`.
 
 Literal values carry their own `kind`: `bool`, `integer`, `decimal`, `text`,
 or `date`.

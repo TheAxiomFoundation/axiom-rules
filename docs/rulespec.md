@@ -447,13 +447,13 @@ rules:
 
 Judgment formulas accept `exactly_one(a, b, ...)` (two or more arguments,
 each any judgment-position expression: a fact reference, a comparison, a
-negation). It holds when exactly one argument holds. It lowers to an
-Or-of-And-of-Nots expansion — branch *i* asserts argument *i* and negates the
-rest — with the same truth table as the hand-written form, so outcomes match
-manual expansions on every input. The lowered tree is flat: one n-ary `or`
-over n `and` branches, where hand-chained `and`/`or` operators nest as binary
-pairs, so compiled structure and traces come out shallower than the manual
-form. Prefer it wherever a rule validates a choose-one set, such as filing
+negation). It holds when exactly one argument holds. It serialises as a
+first-class `exactly_one` node in specs and compiled artifacts, so graph
+consumers see one n-input gate instead of the ~n² expansion. Evaluation
+lowers the node to the Or-of-And-of-Nots expansion — branch *i* asserts
+argument *i* and negates the rest — so outcomes, short-circuit reads,
+missing-input faults, and trace text stay identical to the hand-written
+form on every input. Prefer it wherever a rule validates a choose-one set, such as filing
 statuses:
 
 ```yaml

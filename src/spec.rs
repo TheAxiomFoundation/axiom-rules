@@ -1197,6 +1197,15 @@ pub enum JudgmentExprSpec {
     Not {
         item: Box<JudgmentExprSpec>,
     },
+    /// Holds when exactly one item holds. First-class in the serialized
+    /// surface so artifacts and graph consumers see one n-input gate;
+    /// `to_model` lowers it to the Or-of-And-of-Nots expansion, so
+    /// evaluation, short-circuit reads, missing-input faults, and trace
+    /// text are byte-identical to the hand-written form. Expression-level,
+    /// additive to the serialized surface — no artifact-format-version bump.
+    ExactlyOne {
+        items: Vec<JudgmentExprSpec>,
+    },
 }
 
 impl JudgmentExprSpec {
@@ -1230,6 +1239,31 @@ impl JudgmentExprSpec {
                     .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?,
             )),
             Self::Not { item } => Ok(JudgmentExpr::Not(Box::new(item.to_model()?))),
+            Self::ExactlyOne { items } => {
+                let lowered = items
+                    .iter()
+                    .map(JudgmentExprSpec::to_model)
+                    .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?;
+                Ok(JudgmentExpr::Or(
+                    (0..lowered.len())
+                        .map(|holds| {
+                            JudgmentExpr::And(
+                                lowered
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(position, item)| {
+                                        if position == holds {
+                                            item.clone()
+                                        } else {
+                                            JudgmentExpr::Not(Box::new(item.clone()))
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                ))
+            }
         }
     }
 }

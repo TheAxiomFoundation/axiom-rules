@@ -639,6 +639,35 @@
             "item"
           ],
           "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "description": "Holds when exactly one item holds. First-class in the serialized\nsurface so artifacts and graph consumers see one n-input gate;\n`to_model` lowers it to the Or-of-And-of-Nots expansion, so\nevaluation, short-circuit reads, missing-input faults, and trace\ntext are byte-identical to the hand-written form. Expression-level,\nadditive to the serialized surface — no artifact-format-version bump.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/JudgmentExprSpec"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "exactly_one",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ],
+          "type": "object"
         }
       ]
     },

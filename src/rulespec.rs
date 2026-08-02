@@ -3211,7 +3211,9 @@ fn rewrite_relation_alias_in_judgment(
                 *relation = relation_name.to_string();
             }
         }
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 rewrite_relation_alias_in_judgment(item, alias, relation_name);
             }
@@ -3499,7 +3501,9 @@ fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<
             collect_scalar_relation_names(left, names);
             collect_scalar_relation_names(right, names);
         }
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 collect_judgment_relation_names(item, names);
             }
@@ -3725,7 +3729,9 @@ fn rewrite_judgment_relation_references(
         JudgmentExprSpec::RelationMember { relation, .. } => {
             rewrite_relation_name(relation, origin_target, rewrites);
         }
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 rewrite_judgment_relation_references(
                     item,
@@ -3806,11 +3812,11 @@ fn judgment_uses_imported_derived(
             derived_reference_is_imported(name, origin_target, derived_origin_targets)
         }
         JudgmentExprSpec::RelationMember { .. } => false,
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
-            items.iter().any(|item| {
-                judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
-            })
-        }
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => items.iter().any(|item| {
+            judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
+        }),
         JudgmentExprSpec::Not { item } => {
             judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
         }
