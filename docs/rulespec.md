@@ -450,10 +450,11 @@ each any judgment-position expression: a fact reference, a comparison, a
 negation). It holds when exactly one argument holds. It serialises as a
 first-class `exactly_one` node in specs and compiled artifacts, so graph
 consumers see one n-input gate instead of the ~n² expansion. Evaluation
-lowers the node to the Or-of-And-of-Nots expansion — branch *i* asserts
-argument *i* and negates the rest — so outcomes, short-circuit reads,
-missing-input faults, and trace text stay identical to the hand-written
-form on every input. Prefer it wherever a rule validates a choose-one set, such as filing
+lowers the node to the flat Or-of-And-of-Nots expansion — branch *i*
+asserts argument *i* and negates the rest — so outcomes, short-circuit
+reads, and missing-input faults match hand-written expansions on every
+input. Trace text renders the flat lowering, which is shallower than the
+binary nesting hand-chained `and`/`or` produce. Prefer it wherever a rule validates a choose-one set, such as filing
 statuses:
 
 ```yaml

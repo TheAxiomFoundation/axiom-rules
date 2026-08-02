@@ -1871,12 +1871,14 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
         },
         // `exactly_one(a, b, ...)` lowers to a first-class spec node, so
         // artifacts and graph consumers carry one n-input gate instead of the
-        // ~n² expansion. The spec's `to_model` performs the Or-of-And-of-Nots
-        // lowering, so evaluation, short-circuit reads, missing-input faults,
-        // and trace text stay byte-identical to the hand-written form (the
-        // exactly_one integration tests check sugar against the manual
-        // expansion over every Boolean assignment and for short-circuit and
-        // missing-input-fault behavior).
+        // ~n² expansion. The spec's `to_model` performs the same flat
+        // Or-of-And-of-Nots lowering this arm used to do inline, so
+        // evaluation, short-circuit reads, missing-input faults, and trace
+        // text are unchanged from the pre-first-class sugar. Outcomes and
+        // faults also match hand-written expansions on every input (the
+        // exactly_one integration tests check exactly that); trace text does
+        // not match the manual form byte-for-byte, because hand-chained
+        // and/or nest binary while this lowering is flat n-ary.
         Expr::Call { func, args } => match func.as_str() {
             "exactly_one" => {
                 if args.len() < 2 {

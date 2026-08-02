@@ -1199,10 +1199,14 @@ pub enum JudgmentExprSpec {
     },
     /// Holds when exactly one item holds. First-class in the serialized
     /// surface so artifacts and graph consumers see one n-input gate;
-    /// `to_model` lowers it to the Or-of-And-of-Nots expansion, so
-    /// evaluation, short-circuit reads, missing-input faults, and trace
-    /// text are byte-identical to the hand-written form. Expression-level,
-    /// additive to the serialized surface — no artifact-format-version bump.
+    /// `to_model` lowers it to the flat Or-of-And-of-Nots expansion the
+    /// formula sugar produced before this variant existed, so evaluation,
+    /// short-circuit reads, missing-input faults, and trace text are
+    /// unchanged. Outcomes and faults also match hand-written expansions
+    /// on every input; trace TEXT does not match those byte-for-byte,
+    /// because hand-chained and/or nest as binary pairs while this
+    /// lowering is flat n-ary. Expression-level, additive to the
+    /// serialized surface — no artifact-format-version bump.
     ExactlyOne {
         items: Vec<JudgmentExprSpec>,
     },
