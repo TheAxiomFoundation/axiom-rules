@@ -226,3 +226,95 @@ rules:
     let hits = scan_source(rulespec).expect("module lowers");
     assert!(hits.is_empty(), "extra conjuncts are not a gate: {hits:?}");
 }
+
+mod apply {
+    use axiom_rules_engine::migrate::{
+        extract_version_formula, gate_rewrite, plan_rewrites, replace_version_formula, scan_source,
+    };
+
+    #[test]
+    fn plans_gates_and_rewrites_the_hand_expanded_shape() {
+        let (plans, manual) = plan_rewrites(super::HAND_EXPANDED).expect("lowers");
+        assert!(manual.is_empty());
+        assert_eq!(plans.len(), 1);
+        let plan = &plans[0];
+        assert_eq!(
+            plan.replacement,
+            "exactly_one(status_single, status_married_separate, status_joint, status_head_of_household)"
+        );
+        let old = extract_version_formula(super::HAND_EXPANDED, &plan.rule, 0).expect("extracts");
+        let gate = gate_rewrite(&old, &plan.replacement, &plan.bases).expect("gates");
+        assert_eq!(gate.assignments, 16);
+        assert!(gate.outcomes_match && gate.rescan_clean);
+        let rewritten =
+            replace_version_formula(super::HAND_EXPANDED, &plan.rule, 0, &plan.replacement)
+                .expect("rewrites");
+        assert!(rewritten.contains("formula: exactly_one(status_single,"));
+        assert!(
+            scan_source(&rewritten)
+                .expect("rewritten lowers")
+                .is_empty()
+        );
+        let (again, _) = plan_rewrites(&rewritten).expect("rewritten plans");
+        assert!(again.is_empty(), "apply is idempotent");
+    }
+
+    #[test]
+    fn gates_and_rewrites_the_factored_pairwise_shape() {
+        let source = r#"
+format: rulespec/v1
+rules:
+  - name: filing_status_is_valid
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (a or b or c or d)
+          and not (a and (b or c or d))
+          and not (b and (c or d))
+          and not (c and d)
+"#;
+        let (plans, manual) = plan_rewrites(source).expect("lowers");
+        assert!(manual.is_empty());
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].replacement, "exactly_one(a, b, c, d)");
+        let old = extract_version_formula(source, &plans[0].rule, 0).expect("extracts");
+        let gate = gate_rewrite(&old, &plans[0].replacement, &plans[0].bases).expect("gates");
+        assert!(gate.outcomes_match && gate.rescan_clean);
+        assert_eq!(gate.assignments, 16);
+    }
+
+    #[test]
+    fn a_wrong_replacement_fails_the_gate() {
+        // Deliberately drop a base: the behavioral gate must catch it.
+        let (plans, _) = plan_rewrites(super::HAND_EXPANDED).expect("lowers");
+        let plan = &plans[0];
+        let old = extract_version_formula(super::HAND_EXPANDED, &plan.rule, 0).expect("extracts");
+        let sabotaged = "exactly_one(status_single, status_married_separate, status_joint)";
+        let gate = gate_rewrite(&old, sabotaged, &plan.bases).expect("gate runs");
+        assert!(!gate.outcomes_match, "dropping a base must not pass");
+    }
+
+    #[test]
+    fn non_fact_bases_are_reported_for_hands() {
+        let source = r#"
+format: rulespec/v1
+rules:
+  - name: mixed_gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (monthly_income > 1000 and not is_exempt)
+          or (not (monthly_income > 1000) and is_exempt)
+"#;
+        let (plans, manual) = plan_rewrites(source).expect("lowers");
+        assert!(plans.is_empty());
+        assert_eq!(manual.len(), 1);
+        assert!(manual[0].reason.contains("not a bare fact reference"));
+    }
+}
