@@ -263,3 +263,389 @@ fn not_item(value: &Value) -> Option<&Value> {
     }
     map.get("item")
 }
+
+/// A planned rewrite of one detected site into `exactly_one(...)`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RewritePlan {
+    pub rule: String,
+    pub site: String,
+    pub arity: usize,
+    pub idiom: &'static str,
+    /// Base judgments as bare fact names, in read order.
+    pub bases: Vec<String>,
+    /// The replacement formula source.
+    pub replacement: String,
+}
+
+/// A site that cannot be rewritten mechanically and stays for hands.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ManualSite {
+    pub rule: String,
+    pub site: String,
+    pub arity: usize,
+    pub idiom: &'static str,
+    pub reason: String,
+}
+
+/// Plan `exactly_one` rewrites for every detected site whose bases are all
+/// bare fact references; anything richer is reported for hands, never
+/// guessed at.
+pub fn plan_rewrites(source: &str) -> Result<(Vec<RewritePlan>, Vec<ManualSite>), RuleSpecError> {
+    let program = lower_rulespec_str(source)?;
+    let value = serde_json::to_value(&program)
+        .expect("ProgramSpec serialization is infallible for lowered programs");
+    let mut plans = Vec::new();
+    let mut manual = Vec::new();
+    if let Some(derived) = value.get("derived").and_then(Value::as_array) {
+        for rule in derived {
+            let name = rule
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let Some(versions) = rule.get("versions").and_then(Value::as_array) else {
+                continue;
+            };
+            for (index, version) in versions.iter().enumerate() {
+                let Some(expr) = version.get("expr") else {
+                    continue;
+                };
+                let site = format!("versions[{index}].expr");
+                let detected = expanded_exactly_one(expr)
+                    .map(|(arity, bases)| (arity, bases, "or_of_ands"))
+                    .or_else(|| {
+                        pairwise_exclusions(expr)
+                            .map(|(arity, bases)| (arity, bases, "pairwise_exclusions"))
+                    });
+                let Some((arity, bases, idiom)) = detected else {
+                    continue;
+                };
+                match bases
+                    .iter()
+                    .map(|base| base_fact_name(base))
+                    .collect::<Option<Vec<_>>>()
+                {
+                    Some(names) => {
+                        let replacement = format!("exactly_one({})", names.join(", "));
+                        plans.push(RewritePlan {
+                            rule: name.clone(),
+                            site,
+                            arity,
+                            idiom,
+                            bases: names,
+                            replacement,
+                        });
+                    }
+                    None => manual.push(ManualSite {
+                        rule: name.clone(),
+                        site,
+                        arity,
+                        idiom,
+                        reason: "a base judgment is not a bare fact reference".to_string(),
+                    }),
+                }
+            }
+        }
+    }
+    Ok((plans, manual))
+}
+
+/// Bare fact name behind a base judgment: a derived reference, or the
+/// input/derived `== true` comparison the lowerer builds for bool facts.
+fn base_fact_name(base: &Value) -> Option<String> {
+    let map = base.as_object()?;
+    match map.get("kind")?.as_str()? {
+        "derived" => Some(map.get("name")?.as_str()?.to_string()),
+        "comparison" => {
+            if map.get("op")?.as_str()? != "eq" {
+                return None;
+            }
+            let right = map.get("right")?.as_object()?;
+            if right.get("kind")?.as_str()? != "literal" {
+                return None;
+            }
+            let value = right.get("value")?.as_object()?;
+            if value.get("kind")?.as_str()? != "bool" || value.get("value")? != &Value::Bool(true) {
+                return None;
+            }
+            let left = map.get("left")?.as_object()?;
+            match left.get("kind")?.as_str()? {
+                "input" | "derived" => Some(left.get("name")?.as_str()?.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Replace the formula of `rule`'s `versions[index]` in RuleSpec source text,
+/// preserving everything else byte-for-byte. Handles block (`|-`) and inline
+/// scalars. Returns None if the site cannot be located unambiguously.
+pub fn replace_version_formula(
+    source: &str,
+    rule: &str,
+    version_index: usize,
+    replacement: &str,
+) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let rule_marker = format!("- name: {rule}");
+    let rule_start = lines
+        .iter()
+        .position(|line| line.trim_start().trim_end() == rule_marker)?;
+    let rule_indent = indent_of(lines[rule_start]);
+    let rule_end = (rule_start + 1..lines.len())
+        .find(|&i| {
+            let line = lines[i];
+            !line.trim().is_empty()
+                && indent_of(line) <= rule_indent
+                && line.trim_start().starts_with("- ")
+        })
+        .unwrap_or(lines.len());
+
+    // The index-th `- effective_from` item inside this rule's versions list.
+    let mut seen = 0usize;
+    let mut version_start = None;
+    for i in rule_start + 1..rule_end {
+        if lines[i].trim_start().starts_with("- effective_from") {
+            if seen == version_index {
+                version_start = Some(i);
+                break;
+            }
+            seen += 1;
+        }
+    }
+    let version_start = version_start?;
+    let version_indent = indent_of(lines[version_start]);
+    let version_end = (version_start + 1..rule_end)
+        .find(|&i| {
+            let line = lines[i];
+            !line.trim().is_empty() && indent_of(line) <= version_indent
+        })
+        .unwrap_or(rule_end);
+
+    let formula_line =
+        (version_start..version_end).find(|&i| lines[i].trim_start().starts_with("formula:"))?;
+    let key_indent = indent_of(lines[formula_line]);
+    let is_block = lines[formula_line].trim_end().ends_with("|-")
+        || lines[formula_line].trim_end().ends_with('|');
+    let block_end = if is_block {
+        (formula_line + 1..version_end)
+            .find(|&i| {
+                let line = lines[i];
+                !line.trim().is_empty() && indent_of(line) <= key_indent
+            })
+            .unwrap_or(version_end)
+    } else {
+        formula_line + 1
+    };
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.extend(lines[..formula_line].iter().map(|s| s.to_string()));
+    out.push(format!("{}formula: {replacement}", " ".repeat(key_indent)));
+    out.extend(lines[block_end..].iter().map(|s| s.to_string()));
+    let mut joined = out.join("\n");
+    if source.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Extract the formula source of `rule`'s `versions[index]` verbatim.
+pub fn extract_version_formula(source: &str, rule: &str, version_index: usize) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let rule_marker = format!("- name: {rule}");
+    let rule_start = lines
+        .iter()
+        .position(|line| line.trim_start().trim_end() == rule_marker)?;
+    let rule_indent = indent_of(lines[rule_start]);
+    let rule_end = (rule_start + 1..lines.len())
+        .find(|&i| {
+            let line = lines[i];
+            !line.trim().is_empty()
+                && indent_of(line) <= rule_indent
+                && line.trim_start().starts_with("- ")
+        })
+        .unwrap_or(lines.len());
+    let mut seen = 0usize;
+    let mut version_start = None;
+    for i in rule_start + 1..rule_end {
+        if lines[i].trim_start().starts_with("- effective_from") {
+            if seen == version_index {
+                version_start = Some(i);
+                break;
+            }
+            seen += 1;
+        }
+    }
+    let version_start = version_start?;
+    let version_indent = indent_of(lines[version_start]);
+    let version_end = (version_start + 1..rule_end)
+        .find(|&i| {
+            let line = lines[i];
+            !line.trim().is_empty() && indent_of(line) <= version_indent
+        })
+        .unwrap_or(rule_end);
+    let formula_line =
+        (version_start..version_end).find(|&i| lines[i].trim_start().starts_with("formula:"))?;
+    let key_indent = indent_of(lines[formula_line]);
+    let trimmed = lines[formula_line].trim_start();
+    if trimmed.trim_end().ends_with("|-") || trimmed.trim_end().ends_with('|') {
+        let block_end = (formula_line + 1..version_end)
+            .find(|&i| {
+                let line = lines[i];
+                !line.trim().is_empty() && indent_of(line) <= key_indent
+            })
+            .unwrap_or(version_end);
+        let body: Vec<&str> = lines[formula_line + 1..block_end].iter().copied().collect();
+        let strip = body
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| indent_of(line))
+            .min()
+            .unwrap_or(0);
+        Some(
+            body.iter()
+                .map(|line| {
+                    if line.len() >= strip {
+                        &line[strip..]
+                    } else {
+                        line.trim_start()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    } else {
+        Some(
+            trimmed
+                .trim_start_matches("formula:")
+                .trim()
+                .trim_matches('"')
+                .to_string(),
+        )
+    }
+}
+
+/// Behavioral equivalence report for one rewrite.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GateReport {
+    pub assignments: usize,
+    pub outcomes_match: bool,
+    pub rescan_clean: bool,
+}
+
+/// Prove old and new formulas agree by executing BOTH through the real
+/// engine over every Boolean assignment of the bases, then rescanning the
+/// rewritten form to confirm the pattern is gone. Read order (and so
+/// missing-input fault order) is preserved by construction: the replacement
+/// lists bases in detection order, which is leaf read order.
+pub fn gate_rewrite(
+    old_formula: &str,
+    replacement: &str,
+    bases: &[String],
+) -> Result<GateReport, String> {
+    use crate::api::{
+        ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
+    };
+    use crate::spec::{
+        DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
+    };
+    if bases.len() > 12 {
+        return Err(format!(
+            "gate refuses arity {} (>4096 assignments)",
+            bases.len()
+        ));
+    }
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let run = |formula: &str, mask: usize| -> Result<String, String> {
+        let program = lower_rulespec_str(&probe_module(formula))
+            .map_err(|error| format!("probe lowering failed: {error}"))?;
+        let dataset = DatasetSpec {
+            inputs: bases
+                .iter()
+                .enumerate()
+                .map(|(bit, name)| InputRecordSpec {
+                    name: name.clone(),
+                    entity: "Household".to_string(),
+                    entity_id: "probe-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Bool {
+                        value: mask & (1 << bit) != 0,
+                    },
+                })
+                .collect(),
+            relations: vec![],
+        };
+        let response = execute_request(ExecutionRequest {
+            mode: ExecutionMode::Explain,
+            program,
+            dataset,
+            queries: vec![ExecutionQuery {
+                assessment_date: None,
+                entity_id: "probe-1".to_string(),
+                period: period.clone(),
+                outputs: vec!["migration_probe".to_string()],
+            }],
+        })
+        .map_err(|error| format!("probe execution failed: {error}"))?;
+        match response.results[0].outputs.get("migration_probe") {
+            Some(OutputValue::Judgment { outcome, .. }) => Ok(format!("{outcome:?}")),
+            other => Err(format!("probe produced no judgment: {other:?}")),
+        }
+    };
+    let assignments = 1usize << bases.len();
+    for mask in 0..assignments {
+        // Outcome-or-error must agree on both sides: a replacement that
+        // stops referencing a base makes the engine reject that input, and
+        // that asymmetry is a gate failure, not a tool crash.
+        let old = run(old_formula, mask);
+        let new = run(replacement, mask);
+        let agree = match (&old, &new) {
+            (Ok(old), Ok(new)) => old == new,
+            (Err(old), Err(new)) => old == new,
+            _ => false,
+        };
+        if !agree {
+            return Ok(GateReport {
+                assignments,
+                outcomes_match: false,
+                rescan_clean: false,
+            });
+        }
+        if let (Err(error), Err(_)) = (&old, &new) {
+            return Err(format!("both probes fail identically: {error}"));
+        }
+    }
+    let rescan_clean = scan_source(&probe_module(replacement))
+        .map(|hits| hits.is_empty())
+        .unwrap_or(false);
+    Ok(GateReport {
+        assignments,
+        outcomes_match: true,
+        rescan_clean,
+    })
+}
+
+fn probe_module(formula: &str) -> String {
+    let body = formula
+        .lines()
+        .map(|line| format!("          {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "format: rulespec/v1\nrules:\n  - name: migration_probe\n    kind: derived\n    \
+         entity: Household\n    dtype: Judgment\n    versions:\n      - effective_from: \
+         2026-01-01\n        formula: |-\n{body}\n"
+    )
+}

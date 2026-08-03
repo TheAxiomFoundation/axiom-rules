@@ -280,8 +280,14 @@ fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("scan") => {}
+        Some("apply") => return run_migrate_apply(args.collect()),
         Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
-        None => return Err("usage: migrate scan [--json] <file-or-dir>...".into()),
+        None => {
+            return Err(
+                "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>..."
+                    .into(),
+            );
+        }
     }
     let mut json = false;
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -386,5 +392,131 @@ fn collect_yaml_files(
             files.push(path);
         }
     }
+    Ok(())
+}
+
+/// `migrate apply [--json] [--write] <file-or-dir>...`: rewrite detected
+/// hand-expanded exactly-one sites to `exactly_one(...)`, gating every
+/// rewrite on engine-executed behavioral equivalence over all 2^n base
+/// assignments plus a rescan proving the pattern is gone. Dry-run by
+/// default; `--write` saves. Sites with non-fact bases are reported for
+/// hands and left untouched.
+fn run_migrate_apply(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut json = false;
+    let mut write = false;
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--write" => write = true,
+            other => roots.push(PathBuf::from(other)),
+        }
+    }
+    if roots.is_empty() {
+        return Err("usage: migrate apply [--json] [--write] <file-or-dir>...".into());
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        collect_yaml_files(root, &mut files)?;
+    }
+    files.sort();
+
+    let mut reports: Vec<serde_json::Value> = Vec::new();
+    let mut rewritten_files = 0usize;
+    let mut gated_ok = 0usize;
+    let mut manual_total = 0usize;
+    for file in &files {
+        let original = std::fs::read_to_string(file)?;
+        if !original.contains("format: rulespec/v1") {
+            continue;
+        }
+        let shown = file.display().to_string();
+        let mut source = original.clone();
+        loop {
+            let (plans, manual) = match axiom_rules_engine::migrate::plan_rewrites(&source) {
+                Ok(result) => result,
+                Err(error) => {
+                    reports.push(serde_json::json!({
+                        "file": shown, "unscanned": error.to_string(),
+                    }));
+                    break;
+                }
+            };
+            for site in &manual {
+                manual_total += 1;
+                reports.push(serde_json::json!({
+                    "file": shown, "rule": site.rule, "site": site.site,
+                    "manual": site.reason, "idiom": site.idiom,
+                }));
+            }
+            let Some(plan) = plans.first() else { break };
+            let version_index: usize = plan
+                .site
+                .trim_start_matches("versions[")
+                .trim_end_matches("].expr")
+                .parse()
+                .map_err(|_| format!("unparseable site `{}`", plan.site))?;
+            let old_formula = axiom_rules_engine::migrate::extract_version_formula(
+                &source,
+                &plan.rule,
+                version_index,
+            )
+            .ok_or_else(|| format!("{shown}: cannot locate formula for `{}`", plan.rule))?;
+            let gate = axiom_rules_engine::migrate::gate_rewrite(
+                &old_formula,
+                &plan.replacement,
+                &plan.bases,
+            )
+            .map_err(|error| format!("{shown}: gate failed for `{}`: {error}", plan.rule))?;
+            if !(gate.outcomes_match && gate.rescan_clean) {
+                return Err(format!(
+                    "{shown}: gate REFUSED `{}` ({} assignments, outcomes_match={}, rescan_clean={})",
+                    plan.rule, gate.assignments, gate.outcomes_match, gate.rescan_clean
+                )
+                .into());
+            }
+            gated_ok += 1;
+            reports.push(serde_json::json!({
+                "file": shown, "rule": plan.rule, "site": plan.site,
+                "idiom": plan.idiom, "arity": plan.arity,
+                "replacement": plan.replacement,
+                "gate": {"assignments": gate.assignments, "outcomes_match": true, "rescan_clean": true},
+            }));
+            source = axiom_rules_engine::migrate::replace_version_formula(
+                &source,
+                &plan.rule,
+                version_index,
+                &plan.replacement,
+            )
+            .ok_or_else(|| format!("{shown}: text surgery failed for `{}`", plan.rule))?;
+        }
+        if source != original {
+            rewritten_files += 1;
+            if write {
+                std::fs::write(file, &source)?;
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": if write { "write" } else { "dry-run" },
+                "rewrites_gated": gated_ok,
+                "files_rewritten": rewritten_files,
+                "manual_sites": manual_total,
+                "reports": reports,
+            }))?
+        );
+        return Ok(());
+    }
+    for report in &reports {
+        println!("{report}");
+    }
+    println!(
+        "{}: {gated_ok} rewrite(s) across {rewritten_files} file(s), {manual_total} manual site(s)",
+        if write { "written" } else { "dry-run" },
+    );
     Ok(())
 }
