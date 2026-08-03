@@ -391,7 +391,7 @@ pub fn replace_version_formula(
     let rule_marker = format!("- name: {rule}");
     let rule_start = lines
         .iter()
-        .position(|line| line.trim_start().starts_with(&rule_marker))?;
+        .position(|line| line.trim_start().trim_end() == rule_marker)?;
     let rule_indent = indent_of(lines[rule_start]);
     let rule_end = (rule_start + 1..lines.len())
         .find(|&i| {
@@ -460,7 +460,7 @@ pub fn extract_version_formula(source: &str, rule: &str, version_index: usize) -
     let rule_marker = format!("- name: {rule}");
     let rule_start = lines
         .iter()
-        .position(|line| line.trim_start().starts_with(&rule_marker))?;
+        .position(|line| line.trim_start().trim_end() == rule_marker)?;
     let rule_indent = indent_of(lines[rule_start]);
     let rule_end = (rule_start + 1..lines.len())
         .find(|&i| {

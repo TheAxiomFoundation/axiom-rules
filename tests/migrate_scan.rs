@@ -318,3 +318,39 @@ rules:
         assert!(manual[0].reason.contains("not a bare fact reference"));
     }
 }
+
+#[test]
+fn text_surgery_never_anchors_on_a_longer_name_sharing_the_prefix() {
+    use axiom_rules_engine::migrate::{extract_version_formula, replace_version_formula};
+    // `gate_extra` precedes `gate`; a prefix-matched locator would anchor on
+    // the wrong rule. The gate would catch the mismatch loudly, but the
+    // locator must be exact in the first place.
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: gate_extra
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: other_fact
+  - name: gate
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (a and not b) or (not a and b)
+"#;
+    let extracted = extract_version_formula(source, "gate", 0).expect("locates the exact rule");
+    assert!(extracted.contains("(a and not b)"), "got: {extracted}");
+    let rewritten =
+        replace_version_formula(source, "gate", 0, "exactly_one(a, b)").expect("rewrites");
+    assert!(rewritten.contains("formula: exactly_one(a, b)"));
+    assert!(
+        rewritten.contains("formula: other_fact"),
+        "gate_extra untouched"
+    );
+}
