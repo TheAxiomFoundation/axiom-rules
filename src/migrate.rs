@@ -24,6 +24,11 @@ pub struct ExpandedExactlyOne {
     pub site: String,
     /// Number of mutually exclusive base judgments.
     pub arity: usize,
+    /// Which hand-written idiom matched: `or_of_ands` (branch i asserts base
+    /// i, negates the rest) or `pairwise_exclusions` (a disjunction of the
+    /// bases conjoined with NOT terms forbidding every unordered pair —
+    /// covers both the flat all-pairs and the factored triangular forms).
+    pub idiom: &'static str,
 }
 
 /// Scan one RuleSpec module source for hand-expanded exactly-one patterns.
@@ -70,11 +75,17 @@ pub fn scan_source(source: &str) -> Result<Vec<ExpandedExactlyOne>, RuleSpecErro
 }
 
 fn collect_sites(value: &Value, rule: &str, site: &str, found: &mut Vec<ExpandedExactlyOne>) {
-    if let Some((arity, bases)) = expanded_exactly_one(value) {
+    let detected = expanded_exactly_one(value)
+        .map(|(arity, bases)| (arity, bases, "or_of_ands"))
+        .or_else(|| {
+            pairwise_exclusions(value).map(|(arity, bases)| (arity, bases, "pairwise_exclusions"))
+        });
+    if let Some((arity, bases, idiom)) = detected {
         found.push(ExpandedExactlyOne {
             rule: rule.to_string(),
             site: site.to_string(),
             arity,
+            idiom,
         });
         // The branches of a detected expansion are its own machinery; only
         // the base judgments can legitimately contain further candidates.
@@ -151,6 +162,80 @@ fn expanded_exactly_one(value: &Value) -> Option<(usize, Vec<&Value>)> {
         }
     }
     Some((n, base))
+}
+
+/// Returns the arity and bases when `value` is the disjunction+exclusions
+/// idiom: an and-chain containing exactly one or-chain over n distinct bases
+/// (at least one holds) plus NOT terms whose forbidden pairs cover every
+/// unordered pair of bases (at most one holds) — and nothing else. Each NOT
+/// body must be `x and y` or `x and (y1 or y2 or ...)` with every operand a
+/// base; coverage is checked as a set, so the flat all-pairs form and the
+/// factored triangular form both match, in any order.
+fn pairwise_exclusions(value: &Value) -> Option<(usize, Vec<&Value>)> {
+    let leaves = flatten_chain(value, "and")?;
+    let mut bases: Option<Vec<&Value>> = None;
+    let mut exclusion_bodies: Vec<&Value> = Vec::new();
+    for leaf in &leaves {
+        if flatten_chain(leaf, "or").is_some() {
+            if bases.is_some() {
+                return None;
+            }
+            bases = Some(flatten_chain(leaf, "or")?);
+        } else if let Some(body) = not_item(leaf) {
+            exclusion_bodies.push(body);
+        } else {
+            return None;
+        }
+    }
+    let bases = bases?;
+    let n = bases.len();
+    if n < 2 || exclusion_bodies.is_empty() {
+        return None;
+    }
+    let keys: Vec<String> = bases.iter().map(|base| base.to_string()).collect();
+    let index_of = |value: &Value| -> Option<usize> {
+        let key = value.to_string();
+        keys.iter().position(|candidate| *candidate == key)
+    };
+    if keys.iter().collect::<std::collections::HashSet<_>>().len() != n {
+        return None;
+    }
+    let mut covered = std::collections::HashSet::new();
+    for body in exclusion_bodies {
+        let pair = flatten_chain(body, "and")?;
+        if pair.len() != 2 {
+            return None;
+        }
+        // Accept either orientation: `x and (…)` or `(…) and x`.
+        let (single, group) = if index_of(pair[0]).is_some() {
+            (pair[0], pair[1])
+        } else {
+            (pair[1], pair[0])
+        };
+        let left = index_of(single)?;
+        match flatten_chain(group, "or") {
+            Some(rest) => {
+                for member in rest {
+                    let right = index_of(member)?;
+                    if right == left {
+                        return None;
+                    }
+                    covered.insert((left.min(right), left.max(right)));
+                }
+            }
+            None => {
+                let right = index_of(group)?;
+                if right == left {
+                    return None;
+                }
+                covered.insert((left.min(right), left.max(right)));
+            }
+        }
+    }
+    if covered.len() != n * (n - 1) / 2 {
+        return None;
+    }
+    Some((n, bases))
 }
 
 /// Flatten an associative `and`/`or` chain into its leaves, in source order.

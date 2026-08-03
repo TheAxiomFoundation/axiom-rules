@@ -129,3 +129,100 @@ rules:
     let hits = scan_source(rulespec).expect("module lowers");
     assert!(hits.is_empty(), "three branches over two bases: {hits:?}");
 }
+
+#[test]
+fn finds_the_flat_pairwise_exclusion_idiom() {
+    // The Hawaii/Wisconsin shape: disjunction of the statuses, then a NOT
+    // for every unordered pair.
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_status_is_valid
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (a or b or c or d)
+          and not (a and b)
+          and not (a and c)
+          and not (a and d)
+          and not (b and c)
+          and not (b and d)
+          and not (c and d)
+"#;
+    let hits = scan_source(rulespec).expect("module lowers");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].idiom, "pairwise_exclusions");
+    assert_eq!(hits[0].arity, 4);
+}
+
+#[test]
+fn finds_the_factored_triangular_exclusion_idiom() {
+    // The North Dakota shape: each status excludes the ones after it.
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_status_is_valid
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (a or b or c or d)
+          and not (a and (b or c or d))
+          and not (b and (c or d))
+          and not (c and d)
+"#;
+    let hits = scan_source(rulespec).expect("module lowers");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].idiom, "pairwise_exclusions");
+    assert_eq!(hits[0].arity, 4);
+}
+
+#[test]
+fn refuses_incomplete_pair_coverage() {
+    // Missing not(c and d): at-most-one does not hold, so this is not a gate.
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: leaky
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          (a or b or c or d)
+          and not (a and (b or c or d))
+          and not (b and (c or d))
+"#;
+    let hits = scan_source(rulespec).expect("module lowers");
+    assert!(
+        hits.is_empty(),
+        "incomplete coverage is not a gate: {hits:?}"
+    );
+}
+
+#[test]
+fn refuses_pairwise_shape_with_extra_conjuncts() {
+    // A residency conjunct rides along: the chain is not a pure gate.
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: entangled
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          is_resident
+          and (a or b)
+          and not (a and b)
+"#;
+    let hits = scan_source(rulespec).expect("module lowers");
+    assert!(hits.is_empty(), "extra conjuncts are not a gate: {hits:?}");
+}
