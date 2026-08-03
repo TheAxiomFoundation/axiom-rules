@@ -37,6 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "run-compiled" => return run_compiled(args.collect()),
             #[cfg(feature = "schema")]
             "emit-schemas" => return run_emit_schemas(args.collect()),
+            "migrate" => return run_migrate(args.collect()),
             _ => return Err(format!("unknown command `{command}`\n\n{TOP_USAGE}").into()),
         }
     }
@@ -113,6 +114,8 @@ commands:
                     axiom-compose.
   run-compiled      Execute a compiled artifact against a JSON request on stdin.
   emit-schemas      Write JSON Schemas for the wire types (schema feature only).
+  migrate           Corpus-migration tooling; `migrate scan <path>...` inventories
+                    hand-expanded exactly-one patterns (#152).
   version           Print the engine version.
   help              Print this message.
 
@@ -265,6 +268,123 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     let written = axiom_rules_engine::schema::write_all_to_dir(&out_dir)?;
     for path in written {
         println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// `migrate scan <file-or-dir>...`: inventory hand-expanded exactly-one
+/// patterns across RuleSpec sources. Detection lowers each module through the
+/// real loader and walks the serialized spec (see `migrate`); files that do
+/// not lower standalone are reported as unscanned, never as pattern-free.
+fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("scan") => {}
+        Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
+        None => return Err("usage: migrate scan [--json] <file-or-dir>...".into()),
+    }
+    let mut json = false;
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else {
+            roots.push(PathBuf::from(arg));
+        }
+    }
+    if roots.is_empty() {
+        return Err("usage: migrate scan [--json] <file-or-dir>...".into());
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        collect_yaml_files(root, &mut files)?;
+    }
+    files.sort();
+
+    let mut hits: Vec<(String, axiom_rules_engine::migrate::ExpandedExactlyOne)> = Vec::new();
+    let mut unscanned: Vec<(String, String)> = Vec::new();
+    let mut scanned = 0usize;
+    for file in &files {
+        let source = std::fs::read_to_string(file)?;
+        if !source.contains("format: rulespec/v1") {
+            continue;
+        }
+        let shown = file.display().to_string();
+        match axiom_rules_engine::migrate::scan_source(&source) {
+            Ok(found) => {
+                scanned += 1;
+                for hit in found {
+                    hits.push((shown.clone(), hit));
+                }
+            }
+            Err(error) => unscanned.push((shown, error.to_string())),
+        }
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "scanned_modules": scanned,
+            "hits": hits
+                .iter()
+                .map(|(file, hit)| serde_json::json!({
+                    "file": file,
+                    "rule": hit.rule,
+                    "site": hit.site,
+                    "arity": hit.arity,
+                    "idiom": hit.idiom,
+                }))
+                .collect::<Vec<_>>(),
+            "unscanned": unscanned
+                .iter()
+                .map(|(file, error)| serde_json::json!({"file": file, "error": error}))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    for (file, hit) in &hits {
+        println!(
+            "{file}: rule `{}` {} (arity {}, {})",
+            hit.rule, hit.site, hit.arity, hit.idiom
+        );
+    }
+    println!(
+        "scanned {scanned} modules: {} hand-expanded exactly-one site(s), {} unscanned",
+        hits.len(),
+        unscanned.len(),
+    );
+    for (file, error) in &unscanned {
+        eprintln!("unscanned {file}: {error}");
+    }
+    Ok(())
+}
+
+/// Recursively collect `.yaml` sources under `root`, skipping companion test
+/// files and dot-directories.
+fn collect_yaml_files(
+    root: &std::path::Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if root.is_file() {
+        files.push(root.to_path_buf());
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_yaml_files(&path, files)?;
+        } else if name.ends_with(".yaml") && !name.ends_with(".test.yaml") {
+            files.push(path);
+        }
     }
     Ok(())
 }
