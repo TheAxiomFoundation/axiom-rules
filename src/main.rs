@@ -332,6 +332,7 @@ fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     "rule": hit.rule,
                     "site": hit.site,
                     "arity": hit.arity,
+                    "idiom": hit.idiom,
                 }))
                 .collect::<Vec<_>>(),
             "unscanned": unscanned
@@ -345,8 +346,8 @@ fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     for (file, hit) in &hits {
         println!(
-            "{file}: rule `{}` {} (arity {})",
-            hit.rule, hit.site, hit.arity
+            "{file}: rule `{}` {} (arity {}, {})",
+            hit.rule, hit.site, hit.arity, hit.idiom
         );
     }
     println!(
