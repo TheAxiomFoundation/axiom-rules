@@ -36,3 +36,31 @@ fn unknown_command_is_an_error() {
         .expect("run engine");
     assert!(!out.status.success());
 }
+
+/// A publisher stamping `requires_engine` and a consumer deciding whether an
+/// artifact will load both need the number the loader actually matches. Without
+/// this, the only way to discover incompatibility is to attempt a load — which
+/// is how v0.1.0 and format-2 artifacts both advertised "0.1.0" while every
+/// load failed.
+#[test]
+fn capabilities_report_the_artifact_format_version() {
+    let out = engine().arg("capabilities").output().expect("run engine");
+    assert!(out.status.success(), "capabilities should exit 0");
+    let value: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("capabilities emits JSON");
+    assert_eq!(value["engine_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        value["artifact_format_version"],
+        serde_json::json!(axiom_rules_engine::compile::ARTIFACT_FORMAT_VERSION),
+        "capabilities must report the version the loader enforces"
+    );
+}
+
+#[test]
+fn capabilities_rejects_extra_arguments() {
+    let out = engine()
+        .args(["capabilities", "surprise"])
+        .output()
+        .expect("run engine");
+    assert!(!out.status.success(), "stray arg must be an error");
+}
