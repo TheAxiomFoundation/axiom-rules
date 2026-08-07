@@ -160,6 +160,11 @@ pub struct CompiledProgramArtifact {
 pub struct CompiledProgramMetadata {
     pub evaluation_order: Vec<String>,
     pub fast_path: FastPathMetadata,
+    /// Defaulted only so an artifact that predates the catalog can be read at
+    /// all. Absence is filled from the embedded program in `from_json_source`;
+    /// a catalog that IS present is still checked against the program, so an
+    /// explicit `[]` remains a mismatch rather than a way to skip the check.
+    #[serde(default)]
     pub input_catalog: Vec<CompiledInputCatalogEntry>,
 }
 
@@ -264,6 +269,7 @@ impl CompiledProgramArtifact {
         mut self,
         path: &str,
         options: CompileOptions,
+        fill_absent_catalog: bool,
     ) -> Result<Self, CompileError> {
         if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
@@ -276,6 +282,14 @@ impl CompiledProgramArtifact {
         self.program.validate_rounding()?;
         self.program.validate_effective_ranges()?;
         self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
+        // Fill an absent catalog only now, from the NORMALIZED program:
+        // reconstruction runs `to_program()`, which rejects the compatible
+        // duplicates normalization just collapsed. Doing this earlier turned
+        // published artifacts carrying such duplicates (us-tn-snap) into load
+        // failures.
+        if fill_absent_catalog {
+            self.metadata.input_catalog = compiled_input_catalog(&self.program)?;
+        }
         // This is a derived-metadata consistency check: it proves the metadata
         // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;
@@ -474,12 +488,25 @@ impl CompiledProgramArtifact {
             });
         }
         validate_raw_artifact_contract(&value, path)?;
+        // Absence, not emptiness. `#[serde(default)]` cannot tell an omitted
+        // catalog from an explicit `[]`, and the two must not be treated alike:
+        // an artifact that never carried the field is readable, while one
+        // asserting an empty catalog over a program with inputs is making a
+        // false claim the consistency check below has to catch. The fill
+        // itself happens inside `check_format_version`, AFTER duplicate
+        // normalization: reconstructing the catalog needs `to_program()`,
+        // which rejects the compatible duplicates normalization exists to
+        // collapse (published us-tn-snap carries them).
+        let catalog_absent = value
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|metadata| !metadata.contains_key("input_catalog"));
         let artifact: Self =
             serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
                 error,
             })?;
-        artifact.check_format_version(path, options)
+        artifact.check_format_version(path, options, catalog_absent)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -726,7 +753,17 @@ fn validate_raw_artifact_contract(
     path: &str,
 ) -> Result<(), CompileError> {
     if let Some(program) = value.get("program").and_then(serde_json::Value::as_object) {
-        if program.contains_key("extends") {
+        // `extends` carries unresolved inheritance, which is what the hard cut
+        // removed. A null is not inheritance: engines on the v0.1 maintenance
+        // line serialize the field unconditionally, so every artifact they built
+        // says `"extends": null` while being fully composed. Rejecting on the
+        // key rather than on a value locks out artifacts that satisfy the
+        // contract — which is why released v0.2.0 cannot load any published
+        // artifact today.
+        if program
+            .get("extends")
+            .is_some_and(|extends| !extends.is_null())
+        {
             return Err(invalid_artifact_contract(
                 path,
                 "program.extends was removed; compose before compilation",

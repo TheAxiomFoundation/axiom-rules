@@ -276,3 +276,55 @@ fn v1_and_v2_artifact_schemas_reject_the_other_generation() {
     assert!(!v1_validator.is_valid(&v2_artifact));
     assert!(!v2_validator.is_valid(&v1_artifact));
 }
+
+/// The schema and the loader must agree on the v0.1-maintenance serialization.
+///
+/// Engines on that line write `"extends": null` unconditionally and predate
+/// `metadata.input_catalog`; every published artifact has this shape. The
+/// loader accepts it, so a schema-first consumer must reach the same verdict —
+/// a schema that forbids the `extends` KEY (rather than a non-null value)
+/// rejects every artifact the engine loads, which is the compat lie this
+/// change set exists to remove.
+#[test]
+fn artifact_schema_and_loader_agree_on_maintenance_line_artifacts() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
+    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
+        .expect("fixture compiles to an artifact");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serializes");
+    // Reshape to what a v0.1-maintenance engine emits.
+    value["program"]["extends"] = serde_json::Value::Null;
+    value["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("input_catalog");
+
+    let schema_value = all_schemas()
+        .into_iter()
+        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
+        .expect("artifact schema is published")
+        .schema;
+    let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
+
+    let errors: Vec<String> = validator
+        .iter_errors(&value)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "schema rejects the maintenance-line shape the loader accepts:\n{}",
+        errors.join("\n")
+    );
+    CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect("the loader accepts the same shape the schema accepts");
+
+    // And both refuse a real (non-null) composition directive.
+    value["program"]["extends"] = serde_json::json!("us:policies/base");
+    assert!(
+        validator.iter_errors(&value).next().is_some(),
+        "schema must reject a non-null extends"
+    );
+    CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect_err("the loader must reject a non-null extends");
+}

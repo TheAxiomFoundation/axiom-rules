@@ -302,3 +302,107 @@ fn direct_program_compile_rejects_invalid_carried_citation() {
     program.parameters[0].corpus_citation_path = Some("us/statute".to_string());
     assert!(CompiledProgramArtifact::compile(program).is_err());
 }
+
+/// Artifacts built on the v0.1 maintenance line serialize `extends`
+/// unconditionally, so every one of them says `"extends": null` while being
+/// fully composed. Released v0.2.0 rejects on the key's presence and therefore
+/// cannot load a single published artifact.
+#[test]
+fn a_null_extends_is_not_unresolved_inheritance() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles from YAML");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    value["program"]["extends"] = serde_json::Value::Null;
+
+    CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect("a null extends carries no inheritance and must load");
+
+    // A real inheritance reference is still refused.
+    value["program"]["extends"] = serde_json::json!("us:policies/base");
+    let error = CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect_err("a non-null extends must still be rejected");
+    assert!(
+        error.to_string().contains("compose before compilation"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Absence and emptiness are different claims. An artifact predating the
+/// catalog omits the field and is readable; one asserting `[]` over a program
+/// that has inputs is stating something false and must not be waved through.
+#[test]
+fn an_absent_input_catalog_is_filled_but_an_empty_one_is_checked() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles from YAML");
+    let expected = artifact.metadata.input_catalog.clone();
+    assert!(
+        !expected.is_empty(),
+        "this program must have inputs for the test to mean anything"
+    );
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+
+    // Omitted entirely: readable, and the catalog is recomputed from the program.
+    value["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("input_catalog");
+    let loaded = CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect("an artifact predating the catalog still loads");
+    assert_eq!(
+        loaded.metadata.input_catalog, expected,
+        "the filled catalog must match what the program actually declares"
+    );
+
+    // Explicitly empty: a false claim, and still a mismatch.
+    value["metadata"]["input_catalog"] = serde_json::json!([]);
+    let error = CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect_err("an explicitly empty catalog must not be accepted");
+    assert!(
+        error.to_string().contains("metadata does not match"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Published us-tn-snap carries compatible duplicate parameters that load-time
+/// normalization collapses. Reconstructing an absent input catalog runs
+/// `to_program()`, which rejects those duplicates — so the fill must happen
+/// AFTER normalization. Doing it before turned that artifact into the only
+/// load failure in the release (33/34).
+#[test]
+fn absent_catalog_fill_happens_after_duplicate_normalization() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles from YAML");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    // Reshape to the v0.1-maintenance emission: null extends, no catalog, and
+    // the same parameter declared twice with compatible (mergeable) versions.
+    value["program"]["extends"] = serde_json::Value::Null;
+    value["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("input_catalog");
+    let parameters = value["program"]["parameters"]
+        .as_array_mut()
+        .expect("parameters is an array");
+    // Clone the declaration and shift its version window so the two entries
+    // are compatible-mergeable rather than conflicting; reusing the serialized
+    // version shape keeps the fixture honest about what engines actually emit.
+    let mut duplicate = parameters[0].clone();
+    duplicate["versions"][0]["effective_from"] = serde_json::json!("2027-01-01");
+    duplicate["versions"][0]["effective_to"] = serde_json::json!("2027-12-31");
+    parameters.push(duplicate);
+
+    let loaded = CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect("duplicates must normalize before the catalog fill runs to_program()");
+    assert_eq!(
+        loaded.program.parameters.len(),
+        1,
+        "the compatible duplicates collapse into one declaration"
+    );
+    assert!(
+        loaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "duplicate_parameter_name"),
+        "the merge is diagnosed, not silent"
+    );
+}

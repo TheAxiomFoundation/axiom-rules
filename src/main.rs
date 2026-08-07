@@ -6,7 +6,7 @@ use axiom_rules_engine::api::{
     CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
 };
 use axiom_rules_engine::compile::{
-    CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
+    ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
 use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
@@ -26,6 +26,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("`version` takes no arguments".into());
                 }
                 println!("{}", version_line());
+                return Ok(());
+            }
+            "capabilities" => {
+                if args.next().is_some() {
+                    return Err("`capabilities` takes no arguments".into());
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "engine_version": env!("CARGO_PKG_VERSION"),
+                        "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                    }))?
+                );
                 return Ok(());
             }
             "--help" | "-h" | "help" => {
@@ -82,6 +95,7 @@ mod tests {
             "compile-composed",
             "run-compiled",
             "emit-schemas",
+            "capabilities",
             "version",
             "help",
         ] {
@@ -116,6 +130,9 @@ commands:
   emit-schemas      Write JSON Schemas for the wire types (schema feature only).
   migrate           Corpus-migration tooling; `migrate scan <path>...` inventories
                     hand-expanded exactly-one patterns (#152).
+  capabilities      Print, as JSON, the engine version and the artifact format
+                    version the loader enforces. Semver alone cannot answer
+                    whether an artifact will load; this can.
   version           Print the engine version.
   help              Print this message.
 
