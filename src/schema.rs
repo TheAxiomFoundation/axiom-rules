@@ -165,7 +165,22 @@ fn harden_compiled_artifact_schema(value: &mut Value) {
                     && properties.contains_key("parameters")
                     && properties.contains_key("derived")
                 {
-                    forbidden.push("extends");
+                    // The removed composition directive. The loader tolerates
+                    // exactly one shape — the key absent, or present as null
+                    // (v0.1-maintenance-line engines serialize it
+                    // unconditionally) — and the schema must say the same
+                    // thing: `not required` here would reject every published
+                    // artifact the engine accepts.
+                    properties.insert(
+                        "extends".to_string(),
+                        json!({
+                            "type": "null",
+                            "description": "Removed composition directive; \
+                             tolerated only as null. Compose before \
+                             compilation — any non-null value is rejected \
+                             at load."
+                        }),
+                    );
                 }
                 if let Some(Value::Object(version)) = properties.get_mut("artifact_format_version")
                 {

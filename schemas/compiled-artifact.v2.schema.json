@@ -809,13 +809,6 @@
               "corpus_citation_paths"
             ]
           }
-        },
-        {
-          "not": {
-            "required": [
-              "extends"
-            ]
-          }
         }
       ],
       "properties": {
@@ -825,6 +818,10 @@
             "$ref": "#/$defs/DerivedSpec"
           },
           "type": "array"
+        },
+        "extends": {
+          "description": "Removed composition directive; tolerated only as null. Compose before compilation — any non-null value is rejected at load.",
+          "type": "null"
         },
         "module": {
           "anyOf": [

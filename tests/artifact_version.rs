@@ -362,3 +362,47 @@ fn an_absent_input_catalog_is_filled_but_an_empty_one_is_checked() {
         "unexpected error: {error}"
     );
 }
+
+/// Published us-tn-snap carries compatible duplicate parameters that load-time
+/// normalization collapses. Reconstructing an absent input catalog runs
+/// `to_program()`, which rejects those duplicates — so the fill must happen
+/// AFTER normalization. Doing it before turned that artifact into the only
+/// load failure in the release (33/34).
+#[test]
+fn absent_catalog_fill_happens_after_duplicate_normalization() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles from YAML");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    // Reshape to the v0.1-maintenance emission: null extends, no catalog, and
+    // the same parameter declared twice with compatible (mergeable) versions.
+    value["program"]["extends"] = serde_json::Value::Null;
+    value["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("input_catalog");
+    let parameters = value["program"]["parameters"]
+        .as_array_mut()
+        .expect("parameters is an array");
+    // Clone the declaration and shift its version window so the two entries
+    // are compatible-mergeable rather than conflicting; reusing the serialized
+    // version shape keeps the fixture honest about what engines actually emit.
+    let mut duplicate = parameters[0].clone();
+    duplicate["versions"][0]["effective_from"] = serde_json::json!("2027-01-01");
+    duplicate["versions"][0]["effective_to"] = serde_json::json!("2027-12-31");
+    parameters.push(duplicate);
+
+    let loaded = CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect("duplicates must normalize before the catalog fill runs to_program()");
+    assert_eq!(
+        loaded.program.parameters.len(),
+        1,
+        "the compatible duplicates collapse into one declaration"
+    );
+    assert!(
+        loaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "duplicate_parameter_name"),
+        "the merge is diagnosed, not silent"
+    );
+}

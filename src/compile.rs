@@ -269,6 +269,7 @@ impl CompiledProgramArtifact {
         mut self,
         path: &str,
         options: CompileOptions,
+        fill_absent_catalog: bool,
     ) -> Result<Self, CompileError> {
         if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
@@ -281,6 +282,14 @@ impl CompiledProgramArtifact {
         self.program.validate_rounding()?;
         self.program.validate_effective_ranges()?;
         self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
+        // Fill an absent catalog only now, from the NORMALIZED program:
+        // reconstruction runs `to_program()`, which rejects the compatible
+        // duplicates normalization just collapsed. Doing this earlier turned
+        // published artifacts carrying such duplicates (us-tn-snap) into load
+        // failures.
+        if fill_absent_catalog {
+            self.metadata.input_catalog = compiled_input_catalog(&self.program)?;
+        }
         // This is a derived-metadata consistency check: it proves the metadata
         // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;
@@ -483,20 +492,21 @@ impl CompiledProgramArtifact {
         // catalog from an explicit `[]`, and the two must not be treated alike:
         // an artifact that never carried the field is readable, while one
         // asserting an empty catalog over a program with inputs is making a
-        // false claim the consistency check below has to catch.
+        // false claim the consistency check below has to catch. The fill
+        // itself happens inside `check_format_version`, AFTER duplicate
+        // normalization: reconstructing the catalog needs `to_program()`,
+        // which rejects the compatible duplicates normalization exists to
+        // collapse (published us-tn-snap carries them).
         let catalog_absent = value
             .get("metadata")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|metadata| !metadata.contains_key("input_catalog"));
-        let mut artifact: Self =
+        let artifact: Self =
             serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
                 error,
             })?;
-        if catalog_absent {
-            artifact.metadata.input_catalog = compiled_input_catalog(&artifact.program)?;
-        }
-        artifact.check_format_version(path, options)
+        artifact.check_format_version(path, options, catalog_absent)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
