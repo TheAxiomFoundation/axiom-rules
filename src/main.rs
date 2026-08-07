@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn version_line_uses_package_version() {
-        assert_eq!(version_line(), "axiom-rules-engine 0.2.0");
+        assert_eq!(version_line(), "axiom-rules-engine 0.2.1");
     }
 
     /// Top-level help must name every command `run` dispatches on, so adding a command
