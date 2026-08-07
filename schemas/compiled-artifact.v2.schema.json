@@ -66,6 +66,8 @@
           "$ref": "#/$defs/FastPathMetadata"
         },
         "input_catalog": {
+          "default": [],
+          "description": "Defaulted only so an artifact that predates the catalog can be read at\nall. Absence is filled from the embedded program in `from_json_source`;\na catalog that IS present is still checked against the program, so an\nexplicit `[]` remains a mismatch rather than a way to skip the check.",
           "items": {
             "$ref": "#/$defs/CompiledInputCatalogEntry"
           },
@@ -74,8 +76,7 @@
       },
       "required": [
         "evaluation_order",
-        "fast_path",
-        "input_catalog"
+        "fast_path"
       ],
       "type": "object"
     },
