@@ -14,3 +14,5 @@ pub mod rulespec;
 pub mod schema;
 pub mod source;
 pub mod spec;
+#[cfg(feature = "unit-derivation")]
+pub mod unit_derivation;

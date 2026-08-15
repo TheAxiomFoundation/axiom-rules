@@ -39,6 +39,10 @@ fs = []
 # extension, wasm, finbot, microsim) lean. CI runs the schema tests with
 # `--features schema`; `cargo test --features schema` reproduces them locally.
 schema = ["dep:schemars"]
+# Stage-2 prototype for the ratified unit-derivation semantics. The runtime
+# configuration inside the module is independently disabled by default. This
+# feature does not extend artifact v2 or any publication/launch surface.
+unit-derivation = []
 
 [[bin]]
 name = "axiom-rules-engine"
