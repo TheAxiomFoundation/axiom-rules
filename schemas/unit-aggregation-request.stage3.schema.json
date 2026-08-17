@@ -1,0 +1,507 @@
+{
+  "$defs": {
+    "AggregationEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "AggregationFamilyInput": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor_person": {
+          "type": "string"
+        },
+        "evidence": {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        "named_people": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationKnowledge2"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "scalars": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationKnowledge2"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "anchor_person",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "AggregationKnowledge": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            "status": {
+              "const": "known",
+              "type": "string"
+            },
+            "value": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "status",
+            "value",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            "status": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observations": {
+              "items": {
+                "$ref": "#/$defs/AggregationObservation"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "observations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "observations"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observations": {
+              "items": {
+                "$ref": "#/$defs/AggregationObservation"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "observations"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AggregationKnowledge2": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            "status": {
+              "const": "known",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "value",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            "status": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observations": {
+              "items": {
+                "$ref": "#/$defs/AggregationObservation2"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "observations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "observations"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observations": {
+              "items": {
+                "$ref": "#/$defs/AggregationObservation2"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "observations"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AggregationKnowledge3": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            "status": {
+              "const": "known",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "value",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            "status": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observations": {
+              "items": {
+                "$ref": "#/$defs/AggregationObservation3"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "observations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "observations"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observations": {
+              "items": {
+                "$ref": "#/$defs/AggregationObservation3"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "observations"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AggregationObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        "value": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "AggregationObservation2": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "AggregationObservation3": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "value",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "AggregationPerson": {
+      "additionalProperties": false,
+      "properties": {
+        "age_years": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregationKnowledge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence": {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        "facts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationKnowledge3"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/AggregationPersonRole"
+        },
+        "scalars": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationKnowledge2"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "AggregationPersonRole": {
+      "enum": [
+        "adult",
+        "child"
+      ],
+      "type": "string"
+    },
+    "AggregationRelationFact": {
+      "additionalProperties": false,
+      "properties": {
+        "knowledge": {
+          "$ref": "#/$defs/AggregationKnowledge3"
+        },
+        "tuple": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "tuple",
+        "knowledge"
+      ],
+      "type": "object"
+    },
+    "AggregationRelationFamily": {
+      "additionalProperties": false,
+      "properties": {
+        "completeness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregationEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "facts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AggregationRelationFact"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "scope"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/unit-aggregation-request.stage3.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Evidence-bearing Knowledge-valued roster, relationship, person, child, and family inputs.",
+  "properties": {
+    "family_inputs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AggregationFamilyInput"
+      },
+      "type": "array"
+    },
+    "persons": {
+      "items": {
+        "$ref": "#/$defs/AggregationPerson"
+      },
+      "type": "array"
+    },
+    "relations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AggregationRelationFamily"
+      },
+      "type": "array"
+    },
+    "roster_completeness": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scope": {
+      "type": "string"
+    },
+    "segment": {
+      "type": "string"
+    },
+    "segment_completeness": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AggregationEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "scope",
+    "segment",
+    "persons"
+  ],
+  "title": "Experimental unit aggregation request",
+  "type": "object"
+}

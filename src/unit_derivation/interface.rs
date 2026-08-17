@@ -77,6 +77,7 @@ impl EntityRegistry {
 #[derive(Clone, Debug)]
 pub struct PhaseTwoDataSet {
     dataset: crate::model::DataSet,
+    input_knowledge: Vec<InputKnowledgeRecord>,
     relation_knowledge: Vec<RelationKnowledgeRecord>,
     registry: EntityRegistry,
 }
@@ -88,6 +89,12 @@ pub struct PhaseTwoEngine<'a> {
     ordinary: crate::engine::Engine<'a>,
     program: &'a crate::model::Program,
     relation_knowledge: &'a [RelationKnowledgeRecord],
+}
+
+#[derive(Default)]
+struct ReductionReasonTraversal {
+    derived: BTreeSet<String>,
+    relations: BTreeSet<String>,
 }
 
 impl<'a> PhaseTwoEngine<'a> {
@@ -102,7 +109,7 @@ impl<'a> PhaseTwoEngine<'a> {
             derived_name,
             entity_id,
             period,
-            &mut BTreeSet::new(),
+            &mut ReductionReasonTraversal::default(),
             &mut reasons,
         );
         if !reasons.is_empty() {
@@ -118,10 +125,10 @@ impl<'a> PhaseTwoEngine<'a> {
         name: &str,
         entity_id: &str,
         period: &crate::model::Period,
-        visiting: &mut BTreeSet<String>,
+        visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
     ) {
-        if !visiting.insert(name.to_string()) {
+        if !visiting.derived.insert(name.to_string()) {
             return;
         }
         if let Some(derived) = self.program.derived.get(name)
@@ -134,7 +141,7 @@ impl<'a> PhaseTwoEngine<'a> {
                     .collect_judgment_reduction_reasons(expr, entity_id, period, visiting, reasons),
             }
         }
-        visiting.remove(name);
+        visiting.derived.remove(name);
     }
 
     fn collect_scalar_reduction_reasons(
@@ -142,7 +149,7 @@ impl<'a> PhaseTwoEngine<'a> {
         expr: &crate::model::ScalarExpr,
         entity_id: &str,
         period: &crate::model::Period,
-        visiting: &mut BTreeSet<String>,
+        visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
     ) {
         use crate::model::ScalarExpr;
@@ -193,7 +200,7 @@ impl<'a> PhaseTwoEngine<'a> {
                     *current_slot,
                     entity_id,
                     period,
-                    &mut BTreeSet::new(),
+                    visiting,
                     reasons,
                 );
                 if let Some(predicate) = where_clause {
@@ -236,7 +243,7 @@ impl<'a> PhaseTwoEngine<'a> {
         expr: &crate::model::JudgmentExpr,
         entity_id: &str,
         period: &crate::model::Period,
-        visiting: &mut BTreeSet<String>,
+        visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
     ) {
         use crate::model::JudgmentExpr;
@@ -258,7 +265,18 @@ impl<'a> PhaseTwoEngine<'a> {
             JudgmentExpr::Not(item) => {
                 self.collect_judgment_reduction_reasons(item, entity_id, period, visiting, reasons)
             }
-            JudgmentExpr::RelationMember { .. } => {}
+            JudgmentExpr::RelationMember {
+                relation,
+                current_slot,
+                ..
+            } => self.collect_relation_reasons(
+                relation,
+                *current_slot,
+                entity_id,
+                period,
+                visiting,
+                reasons,
+            ),
         }
     }
 
@@ -268,10 +286,10 @@ impl<'a> PhaseTwoEngine<'a> {
         current_slot: usize,
         entity_id: &str,
         period: &crate::model::Period,
-        visiting: &mut BTreeSet<String>,
+        visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
     ) {
-        if !visiting.insert(relation.to_string()) {
+        if !visiting.relations.insert(relation.to_string()) {
             return;
         }
         for record in self.relation_knowledge.iter().filter(|record| {
@@ -306,8 +324,15 @@ impl<'a> PhaseTwoEngine<'a> {
                 visiting,
                 reasons,
             );
+            self.collect_judgment_reduction_reasons(
+                &derivation.predicate,
+                entity_id,
+                period,
+                visiting,
+                reasons,
+            );
         }
-        visiting.remove(relation);
+        visiting.relations.remove(relation);
     }
 }
 
@@ -318,6 +343,42 @@ impl PhaseTwoDataSet {
 
     pub fn relation_knowledge(&self) -> &[RelationKnowledgeRecord] {
         &self.relation_knowledge
+    }
+
+    pub fn input_complete(
+        &self,
+        name: &str,
+        entity_id: &str,
+        period: &crate::model::Period,
+    ) -> CompleteReduction<crate::model::ScalarValue> {
+        if let Some(record) = self.input_knowledge.iter().find(|record| {
+            record.name == name
+                && record.entity_id == entity_id
+                && record.interval.contains_period(period)
+        }) {
+            return record.reduction.clone();
+        }
+        let mut values = self
+            .dataset
+            .inputs
+            .iter()
+            .filter(|record| {
+                record.name == name
+                    && record.entity_id == entity_id
+                    && record.interval.contains_period(period)
+            })
+            .map(|record| record.value.clone());
+        let Some(first) = values.next() else {
+            return CompleteReduction::Indeterminate {
+                reasons: BTreeSet::from([format!("input:{entity_id}:{name}:missing")]),
+            };
+        };
+        if values.any(|value| value != first) {
+            return CompleteReduction::Indeterminate {
+                reasons: BTreeSet::from([format!("input:{entity_id}:{name}:conflict")]),
+            };
+        }
+        CompleteReduction::Determined(first)
     }
 
     pub fn registry(&self) -> &EntityRegistry {
@@ -696,6 +757,27 @@ pub fn materialize_phase_two_dataset(
     run: &PrototypeRun,
     interval: crate::model::Interval,
 ) -> Result<PhaseTwoDataSet, UnitDerivationError> {
+    materialize_phase_two_dataset_with_knowledge(
+        base,
+        Vec::new(),
+        phase_two_program,
+        input,
+        run,
+        interval,
+    )
+}
+
+/// Materialization barrier variant for callers that have explicit
+/// Knowledge-valued scalar inputs. Only unresolved inputs belong in
+/// `input_knowledge`; determined values must be present in `base.inputs`.
+pub fn materialize_phase_two_dataset_with_knowledge(
+    base: &crate::model::DataSet,
+    mut input_knowledge: Vec<InputKnowledgeRecord>,
+    phase_two_program: &crate::model::Program,
+    input: &ConstitutionInput,
+    run: &PrototypeRun,
+    interval: crate::model::Interval,
+) -> Result<PhaseTwoDataSet, UnitDerivationError> {
     let derived_relations = BTreeSet::from([
         run.derivation.relations.unit_constituent.as_str(),
         run.derivation.relations.participating_member.as_str(),
@@ -729,13 +811,61 @@ pub fn materialize_phase_two_dataset(
             evidence.id.as_str()
         });
     for person in &input.roster.persons {
-        registry.bind_supplied("person", person.clone(), roster_evidence)?;
+        let entity_type = input
+            .supplied_entities
+            .iter()
+            .find(|entity| entity.id == *person)
+            .map_or("person", |entity| entity.entity_type.as_str());
+        registry.bind_supplied(entity_type, person.clone(), roster_evidence)?;
+    }
+    for unit in &run.derivation.units {
+        registry.insert_derived(unit)?;
     }
     for record in &base.inputs {
-        registry.bind_supplied(
-            record.entity.clone(),
-            record.entity_id.clone(),
-            format!("dataset-input:{}", record.name),
+        bind_materialized_entity(
+            &mut registry,
+            &record.entity,
+            &record.entity_id,
+            &format!("dataset-input:{}", record.name),
+        )?;
+    }
+    input_knowledge.sort_by(|left, right| {
+        (
+            left.entity_id.as_str(),
+            left.name.as_str(),
+            &left.interval.start,
+            &left.interval.end,
+        )
+            .cmp(&(
+                right.entity_id.as_str(),
+                right.name.as_str(),
+                &right.interval.start,
+                &right.interval.end,
+            ))
+    });
+    for window in input_knowledge.windows(2) {
+        if window[0].name == window[1].name
+            && window[0].entity_id == window[1].entity_id
+            && window[0].interval == window[1].interval
+        {
+            return Err(UnitDerivationError::InvalidPlan(format!(
+                "duplicate Knowledge input `{}` for `{}`",
+                window[0].name, window[0].entity_id
+            )));
+        }
+    }
+    for record in &input_knowledge {
+        if matches!(record.reduction, CompleteReduction::Determined(_)) {
+            return Err(UnitDerivationError::InvalidPlan(format!(
+                "determined Knowledge input `{}` for `{}` must use the ordinary dataset",
+                record.name, record.entity_id
+            )));
+        }
+        bind_materialized_entity(
+            &mut registry,
+            &record.entity,
+            &record.entity_id,
+            &format!("knowledge-input:{}", record.name),
         )?;
     }
     for record in &base.relations {
@@ -762,10 +892,6 @@ pub fn materialize_phase_two_dataset(
             )?;
         }
     }
-    for unit in &run.derivation.units {
-        registry.insert_derived(unit)?;
-    }
-
     let mut materialized = base.clone();
     let records = run
         .derivation
@@ -836,9 +962,29 @@ pub fn materialize_phase_two_dataset(
 
     Ok(PhaseTwoDataSet {
         dataset: materialized,
+        input_knowledge,
         relation_knowledge,
         registry,
     })
+}
+
+fn bind_materialized_entity(
+    registry: &mut EntityRegistry,
+    entity_type: &str,
+    id: &str,
+    evidence_id: &str,
+) -> Result<(), UnitDerivationError> {
+    if let Some(existing) = registry.get(id) {
+        if existing.entity_type != entity_type {
+            return Err(UnitDerivationError::EntityCollision {
+                id: id.to_string(),
+                existing_type: existing.entity_type.clone(),
+                incoming_type: entity_type.to_string(),
+            });
+        }
+        return Ok(());
+    }
+    registry.bind_supplied(entity_type, id, evidence_id)
 }
 
 fn projection_name(projection: Projection) -> &'static str {

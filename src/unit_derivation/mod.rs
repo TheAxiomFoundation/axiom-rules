@@ -14,14 +14,20 @@ mod tests;
 mod types;
 
 pub use aggregation::{
-    AggregationPerson, AggregationPlan, AggregationRequest, AggregationResult,
-    execute_aggregation_plan, parse_aggregation_plan,
+    AggregatedChild, AggregatedFamily, AggregationEvidence, AggregationFamilyInput,
+    AggregationKnowledge, AggregationObservation, AggregationPerson, AggregationPersonRole,
+    AggregationPlan, AggregationRelationFact, AggregationRelationFamily, AggregationRequest,
+    AggregationResult, AggregationValue, COMPILED_AGGREGATION_ARTIFACT_FORMAT,
+    CompiledAggregationArtifact, UnitDerivationDocumentRegistry,
 };
+#[cfg(test)]
+pub(crate) use aggregation::{compile_aggregation_plan, execute_aggregation_plan};
 pub use compile::{CompiledConstitution, compile};
 pub use evaluate::{derive_units, unit_id};
 pub use interface::{
     EntityRegistry, FrozenLedger, PhaseTwoDataSet, PhaseTwoEngine, Prototype, ShadowChannel,
-    lift_derived_relation, materialize_phase_two_dataset, serialize_experimental_run,
+    lift_derived_relation, materialize_phase_two_dataset,
+    materialize_phase_two_dataset_with_knowledge, serialize_experimental_run,
 };
 pub use types::*;
 

@@ -17,18 +17,136 @@ fn main() {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TopLevelCommand {
+    Compile,
+    CompileComposed,
+    RunCompiled,
+    #[cfg(feature = "unit-derivation")]
+    CompileUnitAggregation,
+    #[cfg(feature = "unit-derivation")]
+    RunUnitAggregation,
+    EmitSchemas,
+    Migrate,
+    Capabilities,
+    Version,
+    Help,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CommandMetadata {
+    command: TopLevelCommand,
+    name: &'static str,
+    aliases: &'static [&'static str],
+    description: &'static [&'static str],
+}
+
+const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
+    CommandMetadata {
+        command: TopLevelCommand::Compile,
+        name: "compile",
+        aliases: &[],
+        description: &[
+            "Compile an atomic RuleSpec module inside a canonical country",
+            "checkout into a program artifact.",
+        ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::CompileComposed,
+        name: "compile-composed",
+        aliases: &[],
+        description: &[
+            "Compile an originless `module.kind: composition` produced by",
+            "axiom-compose.",
+        ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::RunCompiled,
+        name: "run-compiled",
+        aliases: &[],
+        description: &["Execute a compiled artifact against a JSON request on stdin."],
+    },
+    #[cfg(feature = "unit-derivation")]
+    CommandMetadata {
+        command: TopLevelCommand::CompileUnitAggregation,
+        name: "compile-unit-aggregation",
+        aliases: &[],
+        description: &[
+            "Compile and register an experimental typed aggregation artifact",
+            "(unit-derivation feature only).",
+        ],
+    },
+    #[cfg(feature = "unit-derivation")]
+    CommandMetadata {
+        command: TopLevelCommand::RunUnitAggregation,
+        name: "run-unit-aggregation",
+        aliases: &[],
+        description: &[
+            "Run a registered experimental aggregation artifact against JSON",
+            "(unit-derivation feature only).",
+        ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::EmitSchemas,
+        name: "emit-schemas",
+        aliases: &[],
+        description: &["Write JSON Schemas for the wire types (schema feature only)."],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::Migrate,
+        name: "migrate",
+        aliases: &[],
+        description: &[
+            "Corpus-migration tooling; `migrate scan <path>...` inventories",
+            "hand-expanded exactly-one patterns (#152).",
+        ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::Capabilities,
+        name: "capabilities",
+        aliases: &[],
+        description: &[
+            "Print, as JSON, the engine version and the artifact format",
+            "version the loader enforces. Semver alone cannot answer",
+            "whether an artifact will load; this can.",
+        ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::Version,
+        name: "version",
+        aliases: &["--version"],
+        description: &["Print the engine version."],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::Help,
+        name: "help",
+        aliases: &["--help", "-h"],
+        description: &["Print this message."],
+    },
+];
+
+fn recognize_top_level_command(name: &str) -> Option<TopLevelCommand> {
+    TOP_LEVEL_COMMANDS
+        .iter()
+        .find(|metadata| metadata.name == name || metadata.aliases.contains(&name))
+        .map(|metadata| metadata.command)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    if let Some(command) = args.next() {
-        match command.as_str() {
-            "--version" | "version" => {
+    if let Some(command_name) = args.next() {
+        let Some(command) = recognize_top_level_command(&command_name) else {
+            return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
+        };
+        match command {
+            TopLevelCommand::Version => {
                 if args.next().is_some() {
                     return Err("`version` takes no arguments".into());
                 }
                 println!("{}", version_line());
                 return Ok(());
             }
-            "capabilities" => {
+            TopLevelCommand::Capabilities => {
                 if args.next().is_some() {
                     return Err("`capabilities` takes no arguments".into());
                 }
@@ -41,19 +159,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Ok(());
             }
-            "--help" | "-h" | "help" => {
-                println!("{TOP_USAGE}");
+            TopLevelCommand::Help => {
+                println!("{}", top_usage());
                 return Ok(());
             }
-            "compile" => return run_compile(args.collect(), false),
-            "compile-composed" => return run_compile(args.collect(), true),
-            "run-compiled" => return run_compiled(args.collect()),
+            TopLevelCommand::Compile => return run_compile(args.collect(), false),
+            TopLevelCommand::CompileComposed => return run_compile(args.collect(), true),
+            TopLevelCommand::RunCompiled => return run_compiled(args.collect()),
             #[cfg(feature = "unit-derivation")]
-            "run-unit-aggregation" => return run_unit_aggregation(args.collect()),
+            TopLevelCommand::CompileUnitAggregation => {
+                return run_compile_unit_aggregation(args.collect());
+            }
+            #[cfg(feature = "unit-derivation")]
+            TopLevelCommand::RunUnitAggregation => return run_unit_aggregation(args.collect()),
             #[cfg(feature = "schema")]
-            "emit-schemas" => return run_emit_schemas(args.collect()),
-            "migrate" => return run_migrate(args.collect()),
-            _ => return Err(format!("unknown command `{command}`\n\n{TOP_USAGE}").into()),
+            TopLevelCommand::EmitSchemas => return run_emit_schemas(args.collect()),
+            #[cfg(not(feature = "schema"))]
+            TopLevelCommand::EmitSchemas => {
+                return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
+            }
+            TopLevelCommand::Migrate => return run_migrate(args.collect()),
         }
     }
 
@@ -62,7 +187,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // a crash rather than as "I expected JSON on stdin". Only consume stdin when it is
     // actually piped (#120).
     if io::stdin().is_terminal() {
-        println!("{TOP_USAGE}");
+        println!("{}", top_usage());
         return Ok(());
     }
 
@@ -80,31 +205,74 @@ fn version_line() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMPILE_USAGE, TOP_USAGE, version_line};
+    use std::collections::BTreeSet;
+
+    #[cfg(feature = "unit-derivation")]
+    use super::TopLevelCommand;
+    use super::{
+        COMPILE_USAGE, TOP_LEVEL_COMMANDS, recognize_top_level_command, top_usage, version_line,
+    };
 
     #[test]
     fn version_line_uses_package_version() {
         assert_eq!(version_line(), "axiom-rules-engine 0.2.1");
     }
 
-    /// Top-level help must name every command `run` dispatches on, so adding a command
-    /// without documenting it fails here rather than silently leaving users without a way
-    /// to discover it (#120).
+    /// Registration is the sole command-name inventory: recognition and rendered help
+    /// must agree for every feature-enabled entry and alias.
     #[test]
-    fn top_usage_lists_every_dispatched_command() {
-        for command in [
-            "compile",
-            "compile-composed",
-            "run-compiled",
-            "emit-schemas",
-            "capabilities",
-            "version",
-            "help",
-        ] {
+    fn top_level_command_metadata_drives_recognition_and_help() {
+        let usage = top_usage();
+        let mut names = BTreeSet::new();
+        for metadata in TOP_LEVEL_COMMANDS {
             assert!(
-                TOP_USAGE.contains(command),
-                "top-level usage does not mention `{command}`"
+                names.insert(metadata.name),
+                "duplicate top-level command name `{}`",
+                metadata.name
             );
+            assert_eq!(
+                recognize_top_level_command(metadata.name),
+                Some(metadata.command)
+            );
+            assert!(
+                usage.lines().any(|line| {
+                    line.trim_start().split_whitespace().next() == Some(metadata.name)
+                }),
+                "top-level usage does not list `{}`",
+                metadata.name
+            );
+            for alias in metadata.aliases {
+                assert!(names.insert(alias), "duplicate top-level alias `{alias}`");
+                assert_eq!(recognize_top_level_command(alias), Some(metadata.command));
+            }
+        }
+    }
+
+    #[test]
+    fn unit_aggregation_registration_matches_the_feature_gate() {
+        let usage = top_usage();
+        #[cfg(feature = "unit-derivation")]
+        {
+            assert_eq!(
+                recognize_top_level_command("compile-unit-aggregation"),
+                Some(TopLevelCommand::CompileUnitAggregation)
+            );
+            assert_eq!(
+                recognize_top_level_command("run-unit-aggregation"),
+                Some(TopLevelCommand::RunUnitAggregation)
+            );
+            assert!(usage.contains("  compile-unit-aggregation"));
+            assert!(usage.contains("  run-unit-aggregation  "));
+        }
+        #[cfg(not(feature = "unit-derivation"))]
+        {
+            assert_eq!(
+                recognize_top_level_command("compile-unit-aggregation"),
+                None
+            );
+            assert_eq!(recognize_top_level_command("run-unit-aggregation"), None);
+            assert!(!usage.contains("compile-unit-aggregation"));
+            assert!(!usage.contains("run-unit-aggregation"));
         }
     }
 
@@ -112,32 +280,21 @@ mod tests {
     /// the compile-specific text, which is what made `--help` useless before (#120).
     #[test]
     fn top_usage_is_distinct_from_compile_usage() {
-        assert_ne!(TOP_USAGE, COMPILE_USAGE);
-        assert!(TOP_USAGE.starts_with("axiom-rules-engine — RuleSpec compiler and runtime"));
+        let usage = top_usage();
+        assert_ne!(usage, COMPILE_USAGE);
+        assert!(usage.starts_with("axiom-rules-engine — RuleSpec compiler and runtime"));
     }
 }
 
-const TOP_USAGE: &str = "\
+const TOP_USAGE_HEADER: &str = "\
 axiom-rules-engine — RuleSpec compiler and runtime
 
 usage: axiom-rules-engine <command> [options]
        axiom-rules-engine < request.json
 
-commands:
-  compile           Compile an atomic RuleSpec module inside a canonical country
-                    checkout into a program artifact.
-  compile-composed  Compile an originless `module.kind: composition` produced by
-                    axiom-compose.
-  run-compiled      Execute a compiled artifact against a JSON request on stdin.
-  emit-schemas      Write JSON Schemas for the wire types (schema feature only).
-  migrate           Corpus-migration tooling; `migrate scan <path>...` inventories
-                    hand-expanded exactly-one patterns (#152).
-  capabilities      Print, as JSON, the engine version and the artifact format
-                    version the loader enforces. Semver alone cannot answer
-                    whether an artifact will load; this can.
-  version           Print the engine version.
-  help              Print this message.
+commands:\n";
 
+const TOP_USAGE_FOOTER: &str = "\
 Run `axiom-rules-engine <command> --help` for the options of a specific command.
 
 With no command and a piped stdin, a self-contained JSON `ExecutionRequest` is read
@@ -148,6 +305,30 @@ from stdin and its response written to stdout:
 Note: the released v0.1.1 binary has a different compile interface from this one —
 its `compile` takes only --program and --output, and it has no `compile-composed`.
 See docs/install.md.";
+
+fn top_usage() -> String {
+    let mut usage = String::from(TOP_USAGE_HEADER);
+    for metadata in TOP_LEVEL_COMMANDS {
+        usage.push_str("  ");
+        usage.push_str(metadata.name);
+        let padding = if metadata.name.len() < 18 {
+            18 - metadata.name.len()
+        } else {
+            2
+        };
+        usage.push_str(&" ".repeat(padding));
+        usage.push_str(metadata.description[0]);
+        usage.push('\n');
+        for continuation in &metadata.description[1..] {
+            usage.push_str("                    ");
+            usage.push_str(continuation);
+            usage.push('\n');
+        }
+    }
+    usage.push('\n');
+    usage.push_str(TOP_USAGE_FOOTER);
+    usage
+}
 
 const COMPILE_USAGE: &str = "\
 usage: axiom-rules-engine compile --program <absolute rules.yaml> --rulespec-root <absolute rulespec-cc> [--rulespec-root <absolute rulespec-cc>]... --output <compiled.json> [--corpus-provisions <path>]...
@@ -265,23 +446,75 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "unit-derivation")]
-const UNIT_AGGREGATION_USAGE: &str = "\
-usage: axiom-rules-engine run-unit-aggregation --plan <plan.yaml> --enable-experimental-unit-derivation < request.json
+const COMPILE_UNIT_AGGREGATION_USAGE: &str = "\
+usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --output <compiled-aggregation.json>
 
-This command is compiled only with the off-by-default `unit-derivation` Cargo
-feature. The explicit runtime switch is also mandatory. Its plan and result
-use the named experimental channel, never compiled artifact v2.";
+The authoring YAML is accepted only at this compile boundary. The output is a
+canonically digested experimental artifact containing a production-validated
+phase-two program; run-unit-aggregation accepts only that compiled artifact.";
 
 #[cfg(feature = "unit-derivation")]
-fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut plan_path: Option<PathBuf> = None;
-    let mut enabled = false;
+    let mut output_path: Option<PathBuf> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--plan" => {
                 plan_path = Some(PathBuf::from(
                     iter.next().ok_or("`--plan` requires a path argument")?,
+                ));
+            }
+            "--output" => {
+                output_path = Some(PathBuf::from(
+                    iter.next().ok_or("`--output` requires a path argument")?,
+                ));
+            }
+            "--help" | "-h" => {
+                println!("{COMPILE_UNIT_AGGREGATION_USAGE}");
+                return Ok(());
+            }
+            _ => {
+                return Err(format!(
+                    "unknown compile-unit-aggregation argument `{arg}`\n{COMPILE_UNIT_AGGREGATION_USAGE}"
+                )
+                .into());
+            }
+        }
+    }
+    let plan_path = plan_path.ok_or("missing required `--plan /path/to/plan.yaml` argument")?;
+    let output_path = output_path
+        .ok_or("missing required `--output /path/to/compiled-aggregation.json` argument")?;
+    let source = std::fs::read_to_string(&plan_path)?;
+    let mut registry =
+        axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
+    let artifact = registry.register_aggregation_source(&source)?;
+    std::fs::write(&output_path, artifact.to_json_pretty()?)?;
+    println!("compiled_unit_aggregation: {}", output_path.display());
+    println!("plan: {}", artifact.plan_id());
+    println!("plan_digest: {}", artifact.plan_digest);
+    Ok(())
+}
+
+#[cfg(feature = "unit-derivation")]
+const UNIT_AGGREGATION_USAGE: &str = "\
+usage: axiom-rules-engine run-unit-aggregation --artifact <compiled-aggregation.json> --enable-experimental-unit-derivation < request.json
+
+This command is compiled only with the off-by-default `unit-derivation` Cargo
+feature. The explicit runtime switch is also mandatory. Raw plan sidecars are
+not executable; the artifact must pass the experimental document registry and
+the embedded production phase-two artifact loader.";
+
+#[cfg(feature = "unit-derivation")]
+fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifact_path: Option<PathBuf> = None;
+    let mut enabled = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--artifact" => {
+                artifact_path = Some(PathBuf::from(
+                    iter.next().ok_or("`--artifact` requires a path argument")?,
                 ));
             }
             "--enable-experimental-unit-derivation" => enabled = true,
@@ -303,9 +536,15 @@ fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
                 .into(),
         );
     }
-    let plan_path = plan_path.ok_or("missing required `--plan /path/to/plan.yaml` argument")?;
-    let plan_source = std::fs::read_to_string(plan_path)?;
-    let plan = axiom_rules_engine::unit_derivation::parse_aggregation_plan(&plan_source)?;
+    let artifact_path = artifact_path
+        .ok_or("missing required `--artifact /path/to/compiled-aggregation.json` argument")?;
+    let artifact_source = std::fs::read_to_string(artifact_path)?;
+    let mut registry =
+        axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
+    let plan_id = {
+        let artifact = registry.register_aggregation_json(&artifact_source)?;
+        artifact.plan_id().to_string()
+    };
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let request: axiom_rules_engine::unit_derivation::AggregationRequest =
@@ -314,8 +553,7 @@ fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
         enabled: true,
         ..Default::default()
     };
-    let result =
-        axiom_rules_engine::unit_derivation::execute_aggregation_plan(&plan, &request, &config)?;
+    let result = registry.execute_aggregation(&plan_id, &request, &config)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

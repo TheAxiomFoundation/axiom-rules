@@ -142,6 +142,114 @@ fn participant_count_program() -> crate::model::Program {
     phase_two
 }
 
+fn derived_relation_gate_program() -> crate::model::Program {
+    use crate::model::{
+        DType, Derived, DerivedSemantics, JudgmentExpr, RelatedValueRef, RelationDerivation,
+        RelationSchema, ScalarExpr,
+    };
+
+    let constituent = "us:test#member_of_household";
+    let participating = "us:test#snap_unit_member";
+    let filtered = "us:test#known_snap_unit_member";
+    let mut phase_two = crate::model::Program::default();
+    for relation in [constituent, participating] {
+        phase_two
+            .add_relation_schema(RelationSchema {
+                name: relation.to_string(),
+                arity: 2,
+                slot_entities: vec!["snap_household".to_string(), "person".to_string()],
+                derivation: None,
+            })
+            .unwrap();
+    }
+    phase_two
+        .add_relation_schema(RelationSchema {
+            name: filtered.to_string(),
+            arity: 2,
+            slot_entities: vec!["snap_household".to_string(), "person".to_string()],
+            derivation: Some(RelationDerivation {
+                source_relation: constituent.to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                entity: Some("person".to_string()),
+                member_relation: Some(participating.to_string()),
+                slot_entities: vec!["snap_household".to_string(), "person".to_string()],
+                // Keep the membership check nested so the regression proves
+                // the whole predicate tree is traversed, not just a top-level
+                // RelationMember special case.
+                predicate: JudgmentExpr::And(vec![JudgmentExpr::Not(Box::new(JudgmentExpr::Not(
+                    Box::new(JudgmentExpr::RelationMember {
+                        relation: participating.to_string(),
+                        current_slot: 0,
+                        related_slot: 1,
+                    }),
+                )))]),
+            }),
+        })
+        .unwrap();
+
+    let derived = |name: &str, dtype, semantics| Derived {
+        id: None,
+        name: name.to_string(),
+        entity: "snap_household".to_string(),
+        dtype,
+        unit: None,
+        rounding: None,
+        source: None,
+        source_url: None,
+        corpus_citation_path: None,
+        semantics,
+        versions: Vec::new(),
+    };
+    for item in [
+        derived(
+            "direct_count",
+            DType::Integer,
+            DerivedSemantics::Scalar(ScalarExpr::CountRelated {
+                relation: participating.to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                where_clause: None,
+            }),
+        ),
+        derived(
+            "direct_sum",
+            DType::Decimal,
+            DerivedSemantics::Scalar(ScalarExpr::SumRelated {
+                relation: participating.to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                value: RelatedValueRef::Input("amount".to_string()),
+                where_clause: None,
+            }),
+        ),
+        derived(
+            "gated_count",
+            DType::Integer,
+            DerivedSemantics::Scalar(ScalarExpr::CountRelated {
+                relation: filtered.to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                where_clause: None,
+            }),
+        ),
+        derived(
+            "gated_sum",
+            DType::Decimal,
+            DerivedSemantics::Scalar(ScalarExpr::SumRelated {
+                relation: filtered.to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                value: RelatedValueRef::Input("amount".to_string()),
+                where_clause: None,
+            }),
+        ),
+    ] {
+        phase_two.add_derived(item).unwrap();
+    }
+    phase_two
+}
+
 #[test]
 fn runtime_flag_is_independently_off_by_default() {
     let compiled = compile(base_plan(&["a"])).unwrap();
@@ -333,6 +441,92 @@ fn unknown_status_survives_materialization_and_indeterminates_phase_two_count() 
         CompleteReduction::Indeterminate { ref reasons }
             if reasons == &set(&["bool:status_b"])
     ));
+}
+
+#[test]
+fn unknown_and_conflict_survive_derived_relation_gates_for_counts_and_sums() {
+    for conflict in [false, true] {
+        let label = if conflict { "Conflict" } else { "Unknown" };
+        let mut plan = base_plan(&["a", "b"]);
+        plan.edges.push(edge(
+            "known-family-edge",
+            EdgeKind::Base,
+            "a",
+            "b",
+            BoolExpr::Literal(true),
+        ));
+        plan.statuses.push(StatusRule {
+            id: "status-b".to_string(),
+            person: "b".to_string(),
+            when: BoolExpr::fact(FactRef::Bool("status_b".to_string())),
+            citation: citation("review:S-E-derived-relation-gate"),
+        });
+        let mut input = complete_input(&["a", "b"]);
+        if conflict {
+            input.bool_facts.push(BoolFactInput {
+                name: "status_b".to_string(),
+                observations: vec![
+                    observed(true, "status-source-true"),
+                    observed(false, "status-source-false"),
+                ],
+                explicit_unknown: None,
+            });
+        }
+
+        let derivation = derive_units(&compile(plan).unwrap(), &input, &enabled()).unwrap();
+        assert!(derivation.indeterminate.iter().any(|item| {
+            item.person == "b"
+                && item.kind == IndeterminateKind::Role(Projection::ParticipatingMember)
+                && item.unresolved_facts == set(&["bool:status_b"])
+        }));
+        let unit = derivation.units[0].id.clone();
+        let run = PrototypeRun {
+            derivation,
+            comparisons: Vec::new(),
+        };
+        let period = crate::model::Period::month(2026, 7);
+        let interval = crate::model::Interval::covering(&period);
+        let phase_two = derived_relation_gate_program();
+        let mut base = crate::model::DataSet::default();
+        base.add_input(
+            "amount",
+            "person",
+            "a",
+            interval.clone(),
+            crate::model::ScalarValue::Integer(10),
+        );
+        base.add_input(
+            "amount",
+            "person",
+            "b",
+            interval.clone(),
+            crate::model::ScalarValue::Integer(20),
+        );
+        let materialized =
+            materialize_phase_two_dataset(&base, &phase_two, &input, &run, interval).unwrap();
+        assert_eq!(materialized.relation_knowledge().len(), 1);
+        let unresolved = &materialized.relation_knowledge()[0];
+        assert_eq!(unresolved.name, "us:test#snap_unit_member");
+        assert_eq!(unresolved.tuple, vec![unit.clone(), "b".to_string()]);
+        match (&unresolved.truth, conflict) {
+            (LiftedTruth::Unknown { reasons }, false)
+            | (LiftedTruth::Conflict { reasons }, true) => {
+                assert_eq!(reasons, &set(&["bool:status_b"]));
+            }
+            (truth, _) => panic!("{label} materialized as {truth:?}"),
+        }
+
+        let mut engine = materialized.engine(&phase_two);
+        for name in ["direct_count", "direct_sum", "gated_count", "gated_sum"] {
+            assert_eq!(
+                engine.evaluate_scalar(name, &unit, &period).unwrap(),
+                CompleteReduction::Indeterminate {
+                    reasons: set(&["bool:status_b"]),
+                },
+                "{label} was silently dropped by `{name}`"
+            );
+        }
+    }
 }
 
 fn simultaneous_cut_plan(decision: CutEdgeDecision) -> ConstitutionPlan {
@@ -1148,133 +1342,1412 @@ fn invariant_normalized_input_conflict_is_classified_per_affected_projection() {
     );
 }
 
-fn nz_person(id: &str, age_years: i64, values: &[(&str, &str)]) -> AggregationPerson {
-    AggregationPerson {
-        id: id.to_string(),
-        age_years: Some(age_years),
-        scalars: values
-            .iter()
-            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
-            .collect(),
+fn nz_evidence(id: &str) -> AggregationEvidence {
+    AggregationEvidence { id: id.to_string() }
+}
+
+fn nz_known<T>(value: T, id: &str) -> AggregationKnowledge<T> {
+    AggregationKnowledge::Known {
+        value,
+        evidence: nz_evidence(id),
     }
 }
 
-fn nz_values<'a>(
+fn nz_person(id: &str, age_years: i64, values: &[(&str, &str)], child: bool) -> AggregationPerson {
+    let mut scalars = values
+        .iter()
+        .map(|(name, value)| {
+            (
+                (*name).to_string(),
+                nz_known((*value).to_string(), &format!("scalar:{id}:{name}")),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if child {
+        scalars
+            .entry("in_work_tax_credit_child_exclusive_care_fraction".to_string())
+            .or_insert_with(|| nz_known("1".to_string(), &format!("iwtc-care:{id}")));
+    }
+    AggregationPerson {
+        id: id.to_string(),
+        role: if child {
+            AggregationPersonRole::Child
+        } else {
+            AggregationPersonRole::Adult
+        },
+        evidence: nz_evidence(&format!("person:{id}")),
+        age_years: Some(nz_known(age_years, &format!("age:{id}"))),
+        scalars,
+        facts: if child {
+            BTreeMap::from([
+                (
+                    "principal_care_for_family_scheme".to_string(),
+                    nz_known(true, &format!("principal-care:{id}")),
+                ),
+                (
+                    "in_work_tax_credit_principal_caregiver".to_string(),
+                    nz_known(true, &format!("iwtc-principal-care:{id}")),
+                ),
+                (
+                    "not_financially_independent_at_age_18".to_string(),
+                    nz_known(true, &format!("financial-dependence:{id}")),
+                ),
+                (
+                    "attending_school_or_tertiary_at_age_18".to_string(),
+                    nz_known(true, &format!("education:{id}")),
+                ),
+                (
+                    "commissioner_period_contains_segment_at_age_18".to_string(),
+                    nz_known(true, &format!("mc9-period:{id}")),
+                ),
+            ])
+        } else {
+            BTreeMap::new()
+        },
+    }
+}
+
+fn nz_adult_values<'a>(
     weekly_wage: &'a str,
     annual_wage: &'a str,
     base_income: &'a str,
-    before: &'a str,
-    abatement: &'a str,
+    net_benefit: &'a str,
+    gross_benefit: &'a str,
+    tax: &'a str,
+    net_wage: &'a str,
+    hours: &'a str,
+    ietc: &'a str,
+    ietc_continuous: &'a str,
 ) -> Vec<(&'static str, &'a str)> {
     vec![
         ("weekly_wage", weekly_wage),
         ("annual_wage", annual_wage),
         ("annual_family_scheme_base_income", base_income),
-        ("weekly_net_benefit", "0"),
-        ("weekly_gross_benefit", "0"),
-        ("weekly_wage_tax", "0"),
-        ("weekly_net_wage", weekly_wage),
-        ("weekly_hours", "40"),
-        ("ietc_weekly", "0"),
-        ("ietc_continuous_weekly", "0"),
-        ("best_start_before_abatement", before),
-        ("best_start_family_abatement", abatement),
+        ("weekly_net_benefit", net_benefit),
+        ("weekly_gross_benefit", gross_benefit),
+        ("weekly_wage_tax", tax),
+        ("weekly_net_wage", net_wage),
+        ("weekly_hours", hours),
+        ("ietc_weekly", ietc),
+        ("ietc_continuous_weekly", ietc_continuous),
     ]
 }
 
-#[test]
-fn nz_family_fixture_moves_person_child_aggregation_behind_the_barrier() {
-    let plan = parse_aggregation_plan(include_str!(
-        "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
-    ))
-    .unwrap();
-    let primary_values = nz_values(
-        "1000.12345678901234567890123456789012345",
-        "52000",
-        "52000",
-        "0",
-        "0",
-    );
-    let partner_values = nz_values(
-        "740.87654321098765432109876543210987655",
-        "38480",
-        "38480",
-        "0",
-        "0",
-    );
-    let child_one_values = nz_values("0", "0", "0", "4041", "1000");
-    let child_two_values = nz_values("0", "0", "0", "4041", "1000");
-    let request = AggregationRequest {
-        scope: "scenario:binding-best-start".to_string(),
-        segment: "2026-04-01/2027-03-31".to_string(),
-        primary_person: "primary".to_string(),
-        persons: vec![
-            nz_person("primary", 25, &primary_values),
-            nz_person("partner", 25, &partner_values),
-            nz_person("child-0", 1, &child_one_values),
-            nz_person("child-1", 2, &child_two_values),
-        ],
-        relations: BTreeMap::from([
-            (
-                "partner_of".to_string(),
-                vec![["primary".to_string(), "partner".to_string()]],
-            ),
-            (
-                "dependent_child_of".to_string(),
-                vec![
-                    ["primary".to_string(), "child-0".to_string()],
-                    ["primary".to_string(), "child-1".to_string()],
-                ],
-            ),
-        ]),
-        family_scalars: BTreeMap::from([("family_scheme_income".to_string(), "90480".to_string())]),
-    };
-    let result = execute_aggregation_plan(&plan, &request, &enabled()).unwrap();
-    assert_eq!(result.families.len(), 1);
-    let family = &result.families[0];
-    assert!(family.partner_present);
-    assert_eq!(family.counts["dependent_child_count"], 2);
-    assert_eq!(family.counts["best_start_eligible_child_count"], 2);
-    assert_eq!(family.counts["youngest_child_age"], 1);
-    assert_eq!(family.scalars["weekly_wages"], "1741");
-    assert_eq!(family.scalars["annual_family_scheme_base_income"], "90480");
-    assert_eq!(family.scalars["best_start_total"], "7082");
-    assert_eq!(family.scalars["best_start_total_before_abatement"], "8082");
-    assert!(family.children.iter().all(|child| {
-        child.scalars["family_scheme_income"] == "90480"
-            && child.age_bands["best_start_eligible_child_count"]
-            && child.family == family.id
-    }));
+fn nz_relation(name: &str, tuples: &[(&str, &str)], scope: &str) -> AggregationRelationFamily {
+    AggregationRelationFamily {
+        name: name.to_string(),
+        scope: scope.to_string(),
+        completeness: Some(nz_evidence(&format!("complete:{scope}:{name}"))),
+        facts: tuples
+            .iter()
+            .map(|(left, right)| AggregationRelationFact {
+                tuple: [(*left).to_string(), (*right).to_string()],
+                knowledge: nz_known(true, &format!("relation:{name}:{left}:{right}")),
+            })
+            .collect(),
+    }
+}
 
-    let disabled = execute_aggregation_plan(&plan, &request, &Default::default())
+fn nz_request() -> AggregationRequest {
+    let scope = "scenario:binding-best-start";
+    AggregationRequest {
+        scope: scope.to_string(),
+        segment: "2026-04-01/2027-03-31".to_string(),
+        roster_completeness: Some(nz_evidence("complete:roster")),
+        segment_completeness: Some(nz_evidence("complete:segment")),
+        persons: vec![
+            nz_person(
+                "primary",
+                25,
+                &nz_adult_values(
+                    "1000.12345678901234567890123456789012345",
+                    "52000",
+                    "52000",
+                    "11",
+                    "13",
+                    "101",
+                    "899",
+                    "40",
+                    "3",
+                    "4",
+                ),
+                false,
+            ),
+            nz_person(
+                "partner",
+                25,
+                &nz_adult_values(
+                    "740.87654321098765432109876543210987655",
+                    "38480",
+                    "38480",
+                    "7",
+                    "5",
+                    "71",
+                    "669",
+                    "20",
+                    "2",
+                    "6",
+                ),
+                false,
+            ),
+            nz_person(
+                "child-0",
+                1,
+                &[
+                    ("best_start_before_care_and_abatement", "4041"),
+                    ("best_start_claimant_care_fraction", "1"),
+                ],
+                true,
+            ),
+            nz_person(
+                "child-1",
+                2,
+                &[
+                    ("best_start_before_care_and_abatement", "4041"),
+                    ("best_start_claimant_care_fraction", "1"),
+                ],
+                true,
+            ),
+        ],
+        relations: vec![
+            nz_relation("partner_of", &[("primary", "partner")], scope),
+            nz_relation(
+                "dependent_child_of",
+                &[("primary", "child-0"), ("primary", "child-1")],
+                scope,
+            ),
+        ],
+        family_inputs: vec![AggregationFamilyInput {
+            anchor_person: "primary".to_string(),
+            evidence: nz_evidence("family-input:primary"),
+            named_people: BTreeMap::from([(
+                "mc7_entitlement_holder".to_string(),
+                nz_known("primary".to_string(), "mc7:primary"),
+            )]),
+            scalars: BTreeMap::from([
+                (
+                    "family_scheme_income".to_string(),
+                    nz_known("90480".to_string(), "family-income"),
+                ),
+                (
+                    "best_start_family_abatement".to_string(),
+                    nz_known("1000".to_string(), "best-start-adjustment"),
+                ),
+                (
+                    "best_start_abatement_threshold".to_string(),
+                    nz_known("80000".to_string(), "best-start-threshold"),
+                ),
+                (
+                    "best_start_abatement_rate".to_string(),
+                    nz_known("0.1".to_string(), "best-start-rate"),
+                ),
+            ]),
+        }],
+    }
+}
+
+fn determined<T>(value: &AggregationValue<T>) -> &T {
+    match value {
+        AggregationValue::Determined { value } => value,
+        AggregationValue::Indeterminate { reasons } => {
+            panic!("expected Determined, found {reasons:?}")
+        }
+    }
+}
+
+#[test]
+fn nz_family_fixture_uses_registered_artifact_and_asserts_every_output() {
+    let mut registry = UnitDerivationDocumentRegistry::default();
+    let artifact = registry
+        .register_aggregation_source(include_str!(
+            "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
+        ))
+        .unwrap();
+    let artifact_json = artifact.to_json_pretty().unwrap();
+    let mut reloaded = UnitDerivationDocumentRegistry::default();
+    let plan_id = reloaded
+        .register_aggregation_json(&artifact_json)
+        .unwrap()
+        .plan_id()
+        .to_string();
+    let request = nz_request();
+    let result = reloaded
+        .execute_aggregation(&plan_id, &request, &enabled())
+        .unwrap();
+    assert_eq!(result.schema, EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA);
+    assert_eq!(result.plan, "nz:incomeexplorer:family-aggregation-2026-27");
+    assert!(result.plan_digest.starts_with("sha256:"));
+    assert!(result.trace_root.starts_with("sha256:"));
+    let families = determined(&result.families);
+    assert_eq!(families.len(), 1);
+    let family = &families[0];
+    assert_eq!(
+        family.members,
+        vec!["child-0", "child-1", "partner", "primary"]
+    );
+    assert_eq!(*determined(&family.partner_present), true);
+    assert_eq!(
+        family
+            .counts
+            .iter()
+            .map(|(name, value)| (name.as_str(), *determined(value)))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            ("best_start_eligible_child_count", 2),
+            ("child_count_age_0_13", 2),
+            ("child_count_age_14_18", 0),
+            ("dependent_child_count", 2),
+            ("youngest_child_age", 1),
+        ])
+    );
+    assert_eq!(
+        family
+            .predicates
+            .iter()
+            .map(|(name, value)| (name.as_str(), *determined(value)))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            ("has_dependent_children", true),
+            ("has_two_or_more_dependent_children", true),
+            ("jss_sole_parent_youngest_age_at_least_14", false),
+            ("sole_parent_with_dependent_children", false),
+            ("youngest_child_age_at_least_14", false),
+        ])
+    );
+    assert_eq!(
+        family
+            .scalars
+            .iter()
+            .map(|(name, value)| (name.as_str(), determined(value).as_str()))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            ("annual_family_scheme_base_income", "90480"),
+            ("annual_wages", "90480"),
+            ("best_start_entitlement_days", "365"),
+            ("best_start_total", "7082"),
+            ("best_start_total_before_abatement", "8082"),
+            ("best_start_total_continuous_abatement", "7034"),
+            ("family_tax_credit_eldest_dependent_child_care_units", "1"),
+            ("family_tax_credit_entitlement_days", "365"),
+            (
+                "family_tax_credit_subsequent_dependent_child_care_units",
+                "1"
+            ),
+            ("hours_total", "60"),
+            ("ietc_continuous_weekly", "10"),
+            ("ietc_weekly", "5"),
+            ("in_work_tax_credit_child_exclusive_care_fraction", "1"),
+            ("in_work_tax_credit_weekly_periods", "52"),
+            ("weekly_gross_benefit", "18"),
+            ("weekly_net_benefit", "18"),
+            ("weekly_net_wage", "1568"),
+            ("weekly_wage_tax", "172"),
+            ("weekly_wages", "1741"),
+            ("wff_family_credit_abatement_days", "365"),
+        ])
+    );
+    assert_eq!(family.children.len(), 2);
+    for (index, child) in family.children.iter().enumerate() {
+        assert_eq!(child.person, format!("child-{index}"));
+        assert_eq!(child.family, family.id);
+        assert_eq!(*determined(&child.age_years), (index + 1) as i64);
+        assert_eq!(
+            child
+                .age_bands
+                .iter()
+                .map(|(name, value)| (name.as_str(), *determined(value)))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("best_start_eligible_child_count", true),
+                ("child_count_age_0_13", true),
+                ("child_count_age_14_18", false),
+                ("dependent_child_count", true),
+            ])
+        );
+        assert_eq!(
+            child
+                .scalars
+                .iter()
+                .map(|(name, value)| (name.as_str(), determined(value).as_str()))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("best_start_claimant_care_fraction", "1"),
+                ("family_scheme_income", "90480"),
+            ])
+        );
+    }
+
+    let disabled = reloaded
+        .execute_aggregation(&plan_id, &request, &Default::default())
         .expect_err("aggregation retains the independent runtime gate");
     assert_eq!(disabled, UnitDerivationError::Disabled);
 }
 
 #[test]
-fn nz_best_start_host_defect_reproduces_but_plan_has_no_per_child_abatement_operator() {
-    let before = rust_decimal::Decimal::from(4041);
-    let abatement = rust_decimal::Decimal::from(1000);
-    let two = rust_decimal::Decimal::from(2);
-    let host_per_child = (before - abatement).max(rust_decimal::Decimal::ZERO) * two;
-    let family_once = (before * two - abatement).max(rust_decimal::Decimal::ZERO);
-    assert_eq!(host_per_child, rust_decimal::Decimal::from(6082));
-    assert_eq!(family_once, rust_decimal::Decimal::from(7082));
+fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
+    let artifact = nz_artifact();
+    let plan = &artifact.plan;
+    assert_eq!(
+        plan.partner_presence.citation.provision,
+        "Income Tax Act 2007 s MC 7"
+    );
+    assert_eq!(
+        plan.partner_presence.citation.authority,
+        "nz/statute/act/public/2007/0097/section/MC-7"
+    );
+    assert!(!plan.partner_presence.citation.provision.contains("MB 2"));
+    assert!(
+        plan.membership_relations
+            .iter()
+            .find(|relation| relation.relation == "partner_of")
+            .unwrap()
+            .citation
+            .provision
+            .contains("Caller-evidenced")
+    );
+    assert_eq!(plan.age_18_conditions.age, 18);
+    for input in [
+        &plan.age_18_conditions.not_financially_independent_input,
+        &plan.age_18_conditions.attending_school_or_tertiary_input,
+        &plan.age_18_conditions.commissioner_period_input,
+    ] {
+        let declaration = plan
+            .inputs
+            .iter()
+            .find(|declaration| declaration.name == *input)
+            .unwrap();
+        assert_eq!(
+            declaration.citation.authority,
+            "nz/statute/act/public/2007/0097/section/MC-9"
+        );
+    }
+    let best_start_care = plan
+        .inputs
+        .iter()
+        .find(|input| input.name == "best_start_claimant_care_fraction")
+        .unwrap();
+    assert_eq!(
+        best_start_care.citation.provision,
+        "Income Tax Act 2007 s MG 2(5)"
+    );
+    let iwtc_care = plan
+        .inputs
+        .iter()
+        .find(|input| input.name == "in_work_tax_credit_child_exclusive_care_fraction")
+        .unwrap();
+    assert_eq!(
+        iwtc_care.citation.provision,
+        "Income Tax Act 2007 s MC 10(3)"
+    );
+    let limitation_ids = plan
+        .limitations
+        .iter()
+        .map(|limitation| limitation.id.as_str())
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "mc7-entitlement-selection",
+        "mc9-commissioner-period",
+        "mg2-care-fact",
+        "relationship-and-role-classification",
+        "mc10-iwtc-care",
+        "pinned-full-period-scenario",
+        "jss-scenario-gate",
+    ] {
+        assert!(limitation_ids.contains(required));
+    }
+}
 
-    let invalid =
-        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml")
-            .replace(
-                "sum_children_then_subtract_family_once",
-                "sum_per_child_after_abatement",
+#[test]
+fn reviewer_best_start_plan_is_rejected_by_named_family_scope_guard() {
+    let source = include_str!("../../tests/fixtures/unit_derivation/per_child_expressible.yaml");
+    assert!(
+        include_str!("../../tests/fixtures/unit_derivation/per_child_request.json")
+            .contains("\"two_child_abatement\": \"2000\"")
+    );
+    let error = compile_aggregation_plan(source)
+        .expect_err("the exact accepted reviewer plan must now fail semantic validation");
+    assert_eq!(
+        error,
+        UnitDerivationError::DuplicateFamilyScopeReduction {
+            key: "untyped-family-scope".to_string(),
+            first: "safe_best_start_total".to_string(),
+            second: "best_start_total".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
+    let artifact = compile_aggregation_plan(include_str!(
+        "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
+    ))
+    .unwrap();
+    let mut scalar_unknown = nz_request();
+    scalar_unknown.persons[0].scalars.insert(
+        "weekly_wage".to_string(),
+        AggregationKnowledge::Unknown {
+            evidence: nz_evidence("weekly-wage-unknown"),
+        },
+    );
+    let result = execute_aggregation_plan(&artifact, &scalar_unknown, &enabled()).unwrap();
+    let family = &determined(&result.families)[0];
+    assert!(matches!(
+        family.scalars["weekly_wages"],
+        AggregationValue::Indeterminate { .. }
+    ));
+
+    let mut scalar_conflict = nz_request();
+    scalar_conflict.persons[0].scalars.insert(
+        "weekly_wage".to_string(),
+        AggregationKnowledge::Conflict {
+            observations: vec![
+                AggregationObservation {
+                    value: "1000".to_string(),
+                    evidence: nz_evidence("weekly-wage-one"),
+                },
+                AggregationObservation {
+                    value: "2000".to_string(),
+                    evidence: nz_evidence("weekly-wage-two"),
+                },
+            ],
+        },
+    );
+    let result = execute_aggregation_plan(&artifact, &scalar_conflict, &enabled()).unwrap();
+    assert!(matches!(
+        determined(&result.families)[0].scalars["weekly_wages"],
+        AggregationValue::Indeterminate { .. }
+    ));
+
+    let mut missing_family_scalar = nz_request();
+    missing_family_scalar.family_inputs[0]
+        .scalars
+        .remove("family_scheme_income");
+    let result = execute_aggregation_plan(&artifact, &missing_family_scalar, &enabled()).unwrap();
+    let family = &determined(&result.families)[0];
+    assert!(matches!(
+        family.scalars["best_start_total_continuous_abatement"],
+        AggregationValue::Indeterminate { .. }
+    ));
+    assert!(family.children.iter().all(|child| matches!(
+        child.scalars["family_scheme_income"],
+        AggregationValue::Indeterminate { .. }
+    )));
+
+    let mut missing_completeness = nz_request();
+    let missing_child_relation = missing_completeness
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap();
+    missing_child_relation.completeness = None;
+    missing_child_relation.facts.clear();
+    let result = execute_aggregation_plan(&artifact, &missing_completeness, &enabled()).unwrap();
+    assert!(matches!(
+        result.families,
+        AggregationValue::Indeterminate { .. }
+    ));
+}
+
+#[test]
+fn indeterminate_relation_knowledge_cannot_produce_a_smaller_determined_family() {
+    let artifact = nz_artifact();
+    let cases = vec![
+        AggregationKnowledge::Unknown {
+            evidence: nz_evidence("child-relation-unknown"),
+        },
+        AggregationKnowledge::Conflict {
+            observations: vec![AggregationObservation {
+                value: true,
+                evidence: nz_evidence("child-relation-conflict-one"),
+            }],
+        },
+        AggregationKnowledge::Conflict {
+            observations: vec![
+                AggregationObservation {
+                    value: true,
+                    evidence: nz_evidence("child-relation-conflict-true"),
+                },
+                AggregationObservation {
+                    value: false,
+                    evidence: nz_evidence("child-relation-conflict-false"),
+                },
+            ],
+        },
+        AggregationKnowledge::Observations {
+            observations: Vec::new(),
+        },
+    ];
+    for knowledge in cases {
+        let mut request = nz_request();
+        request
+            .relations
+            .iter_mut()
+            .find(|family| family.name == "dependent_child_of")
+            .unwrap()
+            .facts[0]
+            .knowledge = knowledge;
+        let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+        assert!(
+            matches!(result.families, AggregationValue::Indeterminate { .. }),
+            "an unresolved child relation must not become a determined smaller count"
+        );
+    }
+}
+
+#[test]
+fn omitted_relation_is_unknown_but_evidenced_complete_empty_is_known_empty() {
+    let artifact = nz_artifact();
+    let mut omitted = nz_request();
+    omitted
+        .relations
+        .retain(|family| family.name != "dependent_child_of");
+    let result = execute_aggregation_plan(&artifact, &omitted, &enabled()).unwrap();
+    assert!(matches!(
+        result.families,
+        AggregationValue::Indeterminate { .. }
+    ));
+
+    let mut complete_empty = nz_request();
+    complete_empty
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap()
+        .facts
+        .clear();
+    let result = execute_aggregation_plan(&artifact, &complete_empty, &enabled()).unwrap();
+    let primary = determined(&result.families)
+        .iter()
+        .find(|family| family.members.contains(&"primary".to_string()))
+        .unwrap();
+    assert_eq!(*determined(&primary.counts["dependent_child_count"]), 0);
+    assert_eq!(
+        determined(&primary.scalars["best_start_total_before_abatement"]),
+        "0"
+    );
+}
+
+fn nz_artifact() -> CompiledAggregationArtifact {
+    compile_aggregation_plan(include_str!(
+        "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
+    ))
+    .unwrap()
+}
+
+fn replace_children(request: &mut AggregationRequest, ages: &[i64]) {
+    request
+        .persons
+        .retain(|person| !person.id.starts_with("child-"));
+    let child_relation = request
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap();
+    child_relation.facts.clear();
+    for (index, age) in ages.iter().enumerate() {
+        let id = format!("child-{index}");
+        request.persons.push(nz_person(
+            &id,
+            *age,
+            &[
+                ("best_start_before_care_and_abatement", "4041"),
+                ("best_start_claimant_care_fraction", "1"),
+            ],
+            true,
+        ));
+        child_relation.facts.push(AggregationRelationFact {
+            tuple: ["primary".to_string(), id.clone()],
+            knowledge: nz_known(true, &format!("relation:dependent_child_of:primary:{id}")),
+        });
+    }
+}
+
+#[test]
+fn child_age_boundaries_and_every_mc9_condition_are_operational() {
+    let artifact = nz_artifact();
+    let mut request = nz_request();
+    replace_children(&mut request, &[0, 2, 3, 13, 14, 18, 19]);
+    let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+    let family = &determined(&result.families)[0];
+    assert_eq!(*determined(&family.counts["dependent_child_count"]), 6);
+    assert_eq!(
+        *determined(&family.counts["best_start_eligible_child_count"]),
+        2
+    );
+    assert_eq!(*determined(&family.counts["child_count_age_0_13"]), 4);
+    assert_eq!(*determined(&family.counts["child_count_age_14_18"]), 2);
+    assert_eq!(*determined(&family.counts["youngest_child_age"]), 0);
+    let expected = [
+        (true, true, false, true),
+        (true, true, false, true),
+        (false, true, false, true),
+        (false, true, false, true),
+        (false, false, true, true),
+        (false, false, true, true),
+        (false, false, false, false),
+    ];
+    for (child, expected) in family.children.iter().zip(expected) {
+        assert_eq!(
+            (
+                *determined(&child.age_bands["best_start_eligible_child_count"]),
+                *determined(&child.age_bands["child_count_age_0_13"]),
+                *determined(&child.age_bands["child_count_age_14_18"]),
+                *determined(&child.age_bands["dependent_child_count"]),
+            ),
+            expected
+        );
+    }
+
+    for fact in [
+        "not_financially_independent_at_age_18",
+        "attending_school_or_tertiary_at_age_18",
+        "commissioner_period_contains_segment_at_age_18",
+    ] {
+        let mut false_request = request.clone();
+        false_request
+            .persons
+            .iter_mut()
+            .find(|person| person.id == "child-5")
+            .unwrap()
+            .facts
+            .insert(fact.to_string(), nz_known(false, &format!("false:{fact}")));
+        let result = execute_aggregation_plan(&artifact, &false_request, &enabled()).unwrap();
+        let family = &determined(&result.families)[0];
+        assert_eq!(*determined(&family.counts["dependent_child_count"]), 5);
+        assert_eq!(*determined(&family.counts["child_count_age_14_18"]), 1);
+    }
+
+    let mut unknown = request;
+    unknown
+        .persons
+        .iter_mut()
+        .find(|person| person.id == "child-5")
+        .unwrap()
+        .facts
+        .insert(
+            "attending_school_or_tertiary_at_age_18".to_string(),
+            AggregationKnowledge::Unknown {
+                evidence: nz_evidence("education-unknown"),
+            },
+        );
+    let result = execute_aggregation_plan(&artifact, &unknown, &enabled()).unwrap();
+    let family = &determined(&result.families)[0];
+    assert!(matches!(
+        family.counts["dependent_child_count"],
+        AggregationValue::Indeterminate { .. }
+    ));
+    assert!(matches!(
+        family.counts["child_count_age_14_18"],
+        AggregationValue::Indeterminate { .. }
+    ));
+}
+
+#[test]
+fn missing_unknown_and_conflicting_child_inputs_never_reduce_to_zero_or_false() {
+    let artifact = nz_artifact();
+    for age in [
+        None,
+        Some(AggregationKnowledge::Unknown {
+            evidence: nz_evidence("age-unknown"),
+        }),
+        Some(AggregationKnowledge::Conflict {
+            observations: vec![
+                AggregationObservation {
+                    value: 1,
+                    evidence: nz_evidence("age-one"),
+                },
+                AggregationObservation {
+                    value: 2,
+                    evidence: nz_evidence("age-two"),
+                },
+            ],
+        }),
+    ] {
+        let mut request = nz_request();
+        request
+            .persons
+            .iter_mut()
+            .find(|person| person.id == "child-0")
+            .unwrap()
+            .age_years = age;
+        let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+        let family = &determined(&result.families)[0];
+        assert!(matches!(
+            family.counts["dependent_child_count"],
+            AggregationValue::Indeterminate { .. }
+        ));
+        assert!(matches!(
+            family.children[0].age_years,
+            AggregationValue::Indeterminate { .. }
+        ));
+    }
+
+    for knowledge in [
+        AggregationKnowledge::Unknown {
+            evidence: nz_evidence("principal-care-unknown"),
+        },
+        AggregationKnowledge::Conflict {
+            observations: vec![
+                AggregationObservation {
+                    value: true,
+                    evidence: nz_evidence("principal-care-yes"),
+                },
+                AggregationObservation {
+                    value: false,
+                    evidence: nz_evidence("principal-care-no"),
+                },
+            ],
+        },
+    ] {
+        let mut request = nz_request();
+        request
+            .persons
+            .iter_mut()
+            .find(|person| person.id == "child-0")
+            .unwrap()
+            .facts
+            .insert("principal_care_for_family_scheme".to_string(), knowledge);
+        let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+        let family = &determined(&result.families)[0];
+        assert!(matches!(
+            family.counts["dependent_child_count"],
+            AggregationValue::Indeterminate { .. }
+        ));
+        assert!(matches!(
+            family.scalars["best_start_total"],
+            AggregationValue::Indeterminate { .. }
+        ));
+    }
+}
+
+#[test]
+fn mg2_care_fraction_and_principal_care_are_not_defaulted() {
+    let artifact = nz_artifact();
+    for (fraction, expected_gross) in [("0", "0"), ("0.5", "2020.5"), ("1", "4041")] {
+        let mut request = nz_request();
+        replace_children(&mut request, &[1]);
+        request
+            .persons
+            .iter_mut()
+            .find(|person| person.id == "child-0")
+            .unwrap()
+            .scalars
+            .insert(
+                "best_start_claimant_care_fraction".to_string(),
+                nz_known(fraction.to_string(), &format!("care:{fraction}")),
             );
-    let error = parse_aggregation_plan(&invalid)
-        .expect_err("the public plan grammar has no per-child abatement reducer");
+        request.family_inputs[0].scalars.insert(
+            "best_start_family_abatement".to_string(),
+            nz_known("0".to_string(), "no-adjustment"),
+        );
+        let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+        let family = &determined(&result.families)[0];
+        assert_eq!(
+            determined(&family.scalars["best_start_total_before_abatement"]),
+            expected_gross
+        );
+    }
+
+    let mut no_principal_care = nz_request();
+    replace_children(&mut no_principal_care, &[1]);
+    no_principal_care
+        .persons
+        .iter_mut()
+        .find(|person| person.id == "child-0")
+        .unwrap()
+        .facts
+        .insert(
+            "principal_care_for_family_scheme".to_string(),
+            nz_known(false, "no-principal-care"),
+        );
+    let result = execute_aggregation_plan(&artifact, &no_principal_care, &enabled()).unwrap();
+    let family = &determined(&result.families)[0];
+    assert_eq!(*determined(&family.counts["dependent_child_count"]), 0);
+    assert_eq!(
+        determined(&family.scalars["best_start_total_before_abatement"]),
+        "0"
+    );
+
+    for knowledge in [
+        AggregationKnowledge::Unknown {
+            evidence: nz_evidence("best-start-care-unknown"),
+        },
+        AggregationKnowledge::Conflict {
+            observations: vec![
+                AggregationObservation {
+                    value: "0.5".to_string(),
+                    evidence: nz_evidence("best-start-care-half"),
+                },
+                AggregationObservation {
+                    value: "1".to_string(),
+                    evidence: nz_evidence("best-start-care-full"),
+                },
+            ],
+        },
+    ] {
+        let mut request = nz_request();
+        request.persons[2]
+            .scalars
+            .insert("best_start_claimant_care_fraction".to_string(), knowledge);
+        let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+        let family = &determined(&result.families)[0];
+        assert!(matches!(
+            family.scalars["best_start_total"],
+            AggregationValue::Indeterminate { .. }
+        ));
+    }
+
+    for fraction in ["-0.1", "1.1"] {
+        let mut request = nz_request();
+        request.persons[2].scalars.insert(
+            "best_start_claimant_care_fraction".to_string(),
+            nz_known(fraction.to_string(), &format!("out-of-range:{fraction}")),
+        );
+        assert!(matches!(
+            execute_aggregation_plan(&artifact, &request, &enabled()),
+            Err(UnitDerivationError::InvalidPlan(message))
+                if message.contains("must be between 0 and 1")
+        ));
+    }
+
+    let mut inconsistent_iwtc = nz_request();
+    inconsistent_iwtc.persons[2].scalars.insert(
+        "in_work_tax_credit_child_exclusive_care_fraction".to_string(),
+        nz_known("0.5".to_string(), "iwtc-care-half"),
+    );
+    let result = execute_aggregation_plan(&artifact, &inconsistent_iwtc, &enabled()).unwrap();
+    assert!(matches!(
+        determined(&result.families)[0].scalars["in_work_tax_credit_child_exclusive_care_fraction"],
+        AggregationValue::Indeterminate { .. }
+    ));
+}
+
+#[test]
+fn direction_partner_anchor_unpartnered_and_actual_shape_predicates_are_checked() {
+    let artifact = nz_artifact();
+    let mut reversed_child = nz_request();
+    reversed_child
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap()
+        .facts[0]
+        .tuple = ["child-0".to_string(), "primary".to_string()];
+    assert_eq!(
+        execute_aggregation_plan(&artifact, &reversed_child, &enabled()).unwrap_err(),
+        UnitDerivationError::InvalidRelationshipRole {
+            relation: "dependent_child_of".to_string(),
+            person: "child-0".to_string(),
+            role: "caregiver_must_be_adult".to_string(),
+        }
+    );
+
+    let mut reversed_non_holder = nz_request();
+    reversed_non_holder.persons.push(nz_person(
+        "caregiver-2",
+        30,
+        &nz_adult_values("0", "0", "0", "0", "0", "0", "0", "0", "0", "0"),
+        false,
+    ));
+    reversed_non_holder.persons.push(nz_person(
+        "child-2",
+        6,
+        &[
+            ("best_start_before_care_and_abatement", "0"),
+            ("best_start_claimant_care_fraction", "1"),
+        ],
+        true,
+    ));
+    reversed_non_holder
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap()
+        .facts
+        .push(AggregationRelationFact {
+            tuple: ["child-2".to_string(), "caregiver-2".to_string()],
+            knowledge: nz_known(true, "reversed-non-holder"),
+        });
+    assert!(matches!(
+        execute_aggregation_plan(&artifact, &reversed_non_holder, &enabled()),
+        Err(UnitDerivationError::InvalidRelationshipRole { person, role, .. })
+            if person == "child-2" && role == "caregiver_must_be_adult"
+    ));
+
+    let mut reversed_partner = nz_request();
+    reversed_partner
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "partner_of")
+        .unwrap()
+        .facts[0]
+        .tuple = ["partner".to_string(), "primary".to_string()];
+    let result = execute_aggregation_plan(&artifact, &reversed_partner, &enabled()).unwrap();
+    assert!(*determined(
+        &determined(&result.families)[0].partner_present
+    ));
+
+    let mut unpartnered = nz_request();
+    unpartnered.persons.retain(|person| person.id != "partner");
+    unpartnered
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "partner_of")
+        .unwrap()
+        .facts
+        .clear();
+    replace_children(&mut unpartnered, &[14]);
+    let result = execute_aggregation_plan(&artifact, &unpartnered, &enabled()).unwrap();
+    let family = &determined(&result.families)[0];
+    assert!(!*determined(&family.partner_present));
+    assert!(*determined(
+        &family.predicates["sole_parent_with_dependent_children"]
+    ));
+    assert!(*determined(
+        &family.predicates["jss_sole_parent_youngest_age_at_least_14"]
+    ));
+    assert!(*determined(&family.predicates["has_dependent_children"]));
+    assert!(!*determined(
+        &family.predicates["has_two_or_more_dependent_children"]
+    ));
+
+    let mut unknown_holder = nz_request();
+    unknown_holder.family_inputs[0].named_people.insert(
+        "mc7_entitlement_holder".to_string(),
+        AggregationKnowledge::Unknown {
+            evidence: nz_evidence("mc7-holder-unknown"),
+        },
+    );
+    let result = execute_aggregation_plan(&artifact, &unknown_holder, &enabled()).unwrap();
+    assert!(matches!(
+        determined(&result.families)[0].partner_present,
+        AggregationValue::Indeterminate { .. }
+    ));
+
+    let mut child_holder = nz_request();
+    child_holder.family_inputs[0].named_people.insert(
+        "mc7_entitlement_holder".to_string(),
+        nz_known("child-0".to_string(), "invalid-child-holder"),
+    );
+    assert!(matches!(
+        execute_aggregation_plan(&artifact, &child_holder, &enabled()),
+        Err(UnitDerivationError::InvalidRelationshipRole { person, .. })
+            if person == "child-0"
+    ));
+}
+
+#[test]
+fn unrelated_family_preserves_family_id_but_changes_bound_trace() {
+    let artifact = nz_artifact();
+    let base_request = nz_request();
+    let base = execute_aggregation_plan(&artifact, &base_request, &enabled()).unwrap();
+    let base_family = &determined(&base.families)[0];
+    let base_id = base_family.id.clone();
+
+    let mut expanded = base_request.clone();
+    expanded.persons.push(nz_person(
+        "other-adult",
+        30,
+        &nz_adult_values("9", "468", "468", "0", "0", "0", "9", "1", "0", "0"),
+        false,
+    ));
+    expanded.persons.push(nz_person(
+        "other-child",
+        6,
+        &[
+            ("best_start_before_care_and_abatement", "0"),
+            ("best_start_claimant_care_fraction", "1"),
+        ],
+        true,
+    ));
+    expanded
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap()
+        .facts
+        .push(AggregationRelationFact {
+            tuple: ["other-adult".to_string(), "other-child".to_string()],
+            knowledge: nz_known(true, "other-family-child"),
+        });
+    expanded.family_inputs.push(AggregationFamilyInput {
+        anchor_person: "other-adult".to_string(),
+        evidence: nz_evidence("family-input:other-adult"),
+        named_people: BTreeMap::from([(
+            "mc7_entitlement_holder".to_string(),
+            nz_known("other-adult".to_string(), "mc7:other-adult"),
+        )]),
+        scalars: BTreeMap::from([
+            (
+                "family_scheme_income".to_string(),
+                nz_known("468".to_string(), "other-family-income"),
+            ),
+            (
+                "best_start_family_abatement".to_string(),
+                nz_known("0".to_string(), "other-adjustment"),
+            ),
+            (
+                "best_start_abatement_threshold".to_string(),
+                nz_known("80000".to_string(), "other-threshold"),
+            ),
+            (
+                "best_start_abatement_rate".to_string(),
+                nz_known("0.1".to_string(), "other-rate"),
+            ),
+        ]),
+    });
+    let expanded_result = execute_aggregation_plan(&artifact, &expanded, &enabled()).unwrap();
+    let families = determined(&expanded_result.families);
+    assert_eq!(families.len(), 2);
+    let unchanged = families
+        .iter()
+        .find(|family| family.members.contains(&"primary".to_string()))
+        .unwrap();
+    assert_eq!(unchanged.id, base_id);
+    assert_eq!(unchanged, base_family);
+    let other = families
+        .iter()
+        .find(|family| family.members.contains(&"other-adult".to_string()))
+        .unwrap();
+    assert_eq!(
+        other.members,
+        vec!["other-adult".to_string(), "other-child".to_string()]
+    );
+    assert!(!*determined(&other.partner_present));
+    assert_eq!(*determined(&other.counts["dependent_child_count"]), 1);
+    assert_eq!(
+        *determined(&other.counts["best_start_eligible_child_count"]),
+        0
+    );
+    assert_eq!(determined(&other.scalars["weekly_wages"]), "9");
+    assert_eq!(determined(&other.scalars["annual_wages"]), "468");
+    assert_eq!(
+        determined(&other.scalars["best_start_total_before_abatement"]),
+        "0"
+    );
+    assert_eq!(determined(&other.scalars["best_start_total"]), "0");
+    assert_eq!(other.children.len(), 1);
+    assert_eq!(
+        determined(&other.children[0].scalars["family_scheme_income"]),
+        "468"
+    );
+    assert_ne!(expanded_result.trace_root, base.trace_root);
+
+    let mut reordered = base_request;
+    reordered.persons.reverse();
+    reordered.relations.reverse();
+    for family in &mut reordered.relations {
+        family.facts.reverse();
+    }
+    let reordered_result = execute_aggregation_plan(&artifact, &reordered, &enabled()).unwrap();
+    assert_eq!(reordered_result.trace_root, base.trace_root);
+    assert_eq!(reordered_result.families, base.families);
+}
+
+#[test]
+fn aggregation_trace_binds_scalar_evidence_and_normalizes_same_tuple_facts() {
+    let artifact = nz_artifact();
+    let base_request = nz_request();
+    let base = execute_aggregation_plan(&artifact, &base_request, &enabled()).unwrap();
+
+    let mut evidence_edit = base_request.clone();
+    if let AggregationKnowledge::Known { evidence, .. } = evidence_edit.persons[0]
+        .scalars
+        .get_mut("weekly_wage")
+        .unwrap()
+    {
+        evidence.id = "weekly-wage-independent-source".to_string();
+    }
+    let edited = execute_aggregation_plan(&artifact, &evidence_edit, &enabled()).unwrap();
+    assert_eq!(edited.families, base.families);
+    assert_ne!(edited.trace_root, base.trace_root);
+
+    let mut corroborated = base_request.clone();
+    corroborated
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap()
+        .facts
+        .push(AggregationRelationFact {
+            tuple: ["primary".to_string(), "child-0".to_string()],
+            knowledge: nz_known(true, "corroborating-child-source"),
+        });
+    let first = execute_aggregation_plan(&artifact, &corroborated, &enabled()).unwrap();
+    corroborated
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap()
+        .facts
+        .reverse();
+    let reversed = execute_aggregation_plan(&artifact, &corroborated, &enabled()).unwrap();
+    assert_eq!(reversed.trace_root, first.trace_root);
+    assert_eq!(reversed.families, first.families);
+
+    let mut exact_duplicate = base_request;
+    let relation = exact_duplicate
+        .relations
+        .iter_mut()
+        .find(|family| family.name == "dependent_child_of")
+        .unwrap();
+    relation.facts.push(relation.facts[0].clone());
+    let deduplicated = execute_aggregation_plan(&artifact, &exact_duplicate, &enabled()).unwrap();
+    assert_eq!(deduplicated.trace_root, base.trace_root);
+    assert_eq!(deduplicated.families, base.families);
+}
+
+#[test]
+fn conflicting_family_adjustment_is_indeterminate_and_order_invariant() {
+    let artifact = nz_artifact();
+    let mut agreeing = nz_request();
+    agreeing.family_inputs[0].scalars.insert(
+        "best_start_family_abatement".to_string(),
+        AggregationKnowledge::Observations {
+            observations: vec![
+                AggregationObservation {
+                    value: "1000".to_string(),
+                    evidence: nz_evidence("agreeing-adjustment-one"),
+                },
+                AggregationObservation {
+                    value: "1000".to_string(),
+                    evidence: nz_evidence("agreeing-adjustment-two"),
+                },
+            ],
+        },
+    );
+    let agreeing_result = execute_aggregation_plan(&artifact, &agreeing, &enabled()).unwrap();
+    assert_eq!(
+        determined(&determined(&agreeing_result.families)[0].scalars["best_start_total"]),
+        "7082"
+    );
+
+    let mut disagreeing = agreeing;
+    if let AggregationKnowledge::Observations { observations } = disagreeing.family_inputs[0]
+        .scalars
+        .get_mut("best_start_family_abatement")
+        .unwrap()
+    {
+        observations[1].value = "2000".to_string();
+    }
+    let disagreeing_result = execute_aggregation_plan(&artifact, &disagreeing, &enabled()).unwrap();
+    assert!(matches!(
+        determined(&disagreeing_result.families)[0].scalars["best_start_total"],
+        AggregationValue::Indeterminate { .. }
+    ));
+
+    let mut request = nz_request();
+    request.family_inputs[0].scalars.insert(
+        "best_start_family_abatement".to_string(),
+        AggregationKnowledge::Conflict {
+            observations: vec![
+                AggregationObservation {
+                    value: "1000".to_string(),
+                    evidence: nz_evidence("adjustment-one"),
+                },
+                AggregationObservation {
+                    value: "2000".to_string(),
+                    evidence: nz_evidence("adjustment-two"),
+                },
+            ],
+        },
+    );
+    let first = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+    let family = &determined(&first.families)[0];
+    assert!(matches!(
+        family.scalars["best_start_total"],
+        AggregationValue::Indeterminate { .. }
+    ));
+    if let AggregationKnowledge::Conflict { observations } = request.family_inputs[0]
+        .scalars
+        .get_mut("best_start_family_abatement")
+        .unwrap()
+    {
+        observations.reverse();
+    }
+    let reversed = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+    assert_eq!(reversed.trace_root, first.trace_root);
+    assert_eq!(reversed.families, first.families);
+}
+
+#[test]
+fn decimal_context_uses_half_even_at_both_midpoint_parities() {
+    let source =
+        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml")
+            .replace("decimal_precision: 40", "decimal_precision: 2");
+    let artifact = compile_aggregation_plan(&source).unwrap();
+    for (input, expected) in [("1.25", "1.2"), ("1.35", "1.4")] {
+        let mut request = nz_request();
+        request.persons.retain(|person| person.id == "primary");
+        request
+            .relations
+            .iter_mut()
+            .for_each(|family| family.facts.clear());
+        request.persons[0].scalars.insert(
+            "weekly_wage".to_string(),
+            nz_known(input.to_string(), &format!("midpoint:{input}")),
+        );
+        request.family_inputs[0].scalars.insert(
+            "best_start_family_abatement".to_string(),
+            nz_known("0".to_string(), "zero-adjustment"),
+        );
+        let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+        let family = &determined(&result.families)[0];
+        assert_eq!(determined(&family.scalars["weekly_wages"]), expected);
+    }
+}
+
+#[test]
+fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected() {
+    let artifact = nz_artifact();
+    let pristine: serde_json::Value =
+        serde_json::from_str(&artifact.to_json_pretty().unwrap()).unwrap();
+    let mut value = pristine.clone();
+    value["plan_digest"] = serde_json::json!(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    let error = CompiledAggregationArtifact::from_json_str(&serde_json::to_string(&value).unwrap())
+        .unwrap_err();
     assert!(matches!(
         error,
-        UnitDerivationError::InvalidPlan(message)
-            if message.contains("invalid aggregation plan YAML")
-                && message.contains("sum_per_child_after_abatement")
+        UnitDerivationError::InvalidAggregationArtifact(message)
+            if message.contains("advertised plan digest")
     ));
+
+    let source =
+        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml");
+    let citation_edit = compile_aggregation_plan(&source.replace(
+        "Income Tax Act 2007 s LC 13",
+        "Income Tax Act 2007 s LC 13 (citation mutation)",
+    ))
+    .unwrap();
+    assert_ne!(artifact.plan_digest, citation_edit.plan_digest);
+
+    for (pointer, replacement) in [
+        ("/format", serde_json::json!("wrong-format")),
+        ("/semantics_version", serde_json::json!("wrong-semantics")),
+        (
+            "/constitution_digest",
+            serde_json::json!(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+        ),
+        (
+            "/phase_two_artifact/engine_version",
+            serde_json::json!("tampered-engine"),
+        ),
+    ] {
+        let mut mutant = pristine.clone();
+        *mutant.pointer_mut(pointer).unwrap() = replacement;
+        let mut registry = UnitDerivationDocumentRegistry::default();
+        assert!(
+            registry
+                .register_aggregation_json(&serde_json::to_string(&mutant).unwrap())
+                .is_err(),
+            "registry accepted artifact mutation at `{pointer}`"
+        );
+    }
+
+    let mut registry = UnitDerivationDocumentRegistry::default();
+    registry
+        .register_aggregation_artifact(artifact.clone())
+        .unwrap();
+    assert!(matches!(
+        registry.register_aggregation_artifact(artifact),
+        Err(UnitDerivationError::DuplicateNamespace { namespace, .. })
+            if namespace == "compiled unit-derivation document"
+    ));
+}
+
+#[test]
+fn every_stage3_structural_guard_kills_its_isolated_plan_mutant() {
+    let source =
+        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml");
+    let mutants = [
+        (
+            "all-members scalar reduction",
+            source.replacen("selector: adults", "selector: all_members", 1),
+        ),
+        (
+            "legacy child scalar alias",
+            source.replacen(
+                "child_gross_input: best_start_before_care_and_abatement",
+                "child_value: best_start_before_care_and_abatement",
+                1,
+            ),
+        ),
+        (
+            "family adjustment moved to child scope",
+            source.replacen(
+                "- name: best_start_family_abatement\n    scope: family",
+                "- name: best_start_family_abatement\n    scope: child",
+                1,
+            ),
+        ),
+        (
+            "family adjustment key mismatch",
+            source.replacen(
+                "- name: best_start_family_abatement\n    scope: family\n    kind: family_adjustment\n    reduction_key: best_start",
+                "- name: best_start_family_abatement\n    scope: family\n    kind: family_adjustment\n    reduction_key: another_family_reduction",
+                1,
+            ),
+        ),
+        (
+            "child gross loses typed provenance",
+            source.replacen("kind: child_gross_amount", "kind: additive_amount", 1),
+        ),
+        (
+            "wrong care operand",
+            source.replacen(
+                "care_fraction_input: best_start_claimant_care_fraction",
+                "care_fraction_input: in_work_tax_credit_child_exclusive_care_fraction",
+                1,
+            ),
+        ),
+        (
+            "child relation made symmetric",
+            source.replacen(
+                "- relation: dependent_child_of\n    direction: directed",
+                "- relation: dependent_child_of\n    direction: symmetric",
+                1,
+            ),
+        ),
+        (
+            "child tuple role swapped",
+            source.replacen("right_role: child", "right_role: caregiver", 1),
+        ),
+        (
+            "child projection reads family input",
+            source.replacen(
+                "- output: best_start_claimant_care_fraction\n    input: best_start_claimant_care_fraction",
+                "- output: best_start_claimant_care_fraction\n    input: family_scheme_income",
+                1,
+            ),
+        ),
+        (
+            "shape predicate names missing count",
+            source.replacen(
+                "count: dependent_child_count, minimum: 1",
+                "count: missing_child_count, minimum: 1",
+                1,
+            ),
+        ),
+        (
+            "required legal citation removed",
+            source.replacen(
+                "authority: nz/statute/act/public/2007/0097/section/MC-7",
+                "authority: ''",
+                1,
+            ),
+        ),
+    ];
+    for (name, mutant) in mutants {
+        assert_ne!(mutant, source, "mutant `{name}` must change the fixture");
+        assert!(
+            compile_aggregation_plan(&mutant).is_err(),
+            "plan validator accepted `{name}` mutant"
+        );
+    }
 }
 
 #[test]
@@ -1337,6 +2810,236 @@ fn compiled_semantics_digest_is_independently_recomputed_and_churns_on_semantic_
         compile(citation_edit).unwrap().semantics_digest(),
         "citation edits must churn the internally computed semantics digest"
     );
+}
+
+fn trace_binding_plan() -> ConstitutionPlan {
+    let mut plan = base_plan(&["a", "b"]);
+    plan.edges.push(edge(
+        "kin-edge",
+        EdgeKind::Base,
+        "a",
+        "b",
+        relation_expr("kin", "a", "b"),
+    ));
+    plan.statuses.push(StatusRule {
+        id: "status-b".to_string(),
+        person: "b".to_string(),
+        when: BoolExpr::fact(FactRef::Bool("status_b".to_string())),
+        citation: citation("trace:status-b"),
+    });
+    plan
+}
+
+fn trace_binding_input() -> ConstitutionInput {
+    let mut input = complete_input(&["a", "b"]);
+    let scope = input.roster.scope.clone();
+    input.relation_families = vec![
+        RelationFamilyInput {
+            name: "kin".to_string(),
+            scope: scope.clone(),
+            completeness: Some(evidence("complete-kin")),
+            facts: vec![
+                RelationFact {
+                    tuple: vec!["a".to_string(), "b".to_string()],
+                    observation: observed(true, "kin-a-b"),
+                },
+                RelationFact {
+                    tuple: vec!["b".to_string(), "a".to_string()],
+                    observation: observed(false, "kin-b-a"),
+                },
+            ],
+        },
+        RelationFamilyInput {
+            name: "unused_relation".to_string(),
+            scope,
+            completeness: Some(evidence("complete-unused-relation")),
+            facts: vec![RelationFact {
+                tuple: vec!["a".to_string(), "b".to_string()],
+                observation: observed(true, "unused-relation-a-b"),
+            }],
+        },
+    ];
+    input.bool_facts = vec![
+        BoolFactInput {
+            name: "status_b".to_string(),
+            observations: vec![observed(false, "status-b-false")],
+            explicit_unknown: None,
+        },
+        BoolFactInput {
+            name: "unused_bool".to_string(),
+            observations: vec![
+                observed(true, "unused-bool-true"),
+                observed(false, "unused-bool-false"),
+            ],
+            explicit_unknown: None,
+        },
+    ];
+    input.supplied_entities = vec![
+        SuppliedEntity {
+            entity_type: "external_case".to_string(),
+            id: "external-1".to_string(),
+            evidence: evidence("external-1-evidence"),
+        },
+        SuppliedEntity {
+            entity_type: "external_case".to_string(),
+            id: "external-2".to_string(),
+            evidence: evidence("external-2-evidence"),
+        },
+    ];
+    input.integrity_constraints = vec![
+        IntegrityConstraint {
+            id: "constraint-a".to_string(),
+            expr: BoolExpr::Literal(true),
+            citation: citation("trace:constraint-a"),
+        },
+        IntegrityConstraint {
+            id: "constraint-b".to_string(),
+            expr: BoolExpr::Literal(true),
+            citation: citation("trace:constraint-b"),
+        },
+    ];
+    input
+}
+
+fn trace_binding_root(plan: &ConstitutionPlan, input: &ConstitutionInput) -> String {
+    derive_units(&compile(plan.clone()).unwrap(), input, &enabled())
+        .unwrap()
+        .trace
+        .root
+}
+
+#[test]
+fn trace_root_structurally_normalizes_input_order_and_exact_duplicates() {
+    let plan = trace_binding_plan();
+    let input = trace_binding_input();
+    let expected = trace_binding_root(&plan, &input);
+
+    let mut reordered = input.clone();
+    reordered.roster.persons.reverse();
+    reordered.relation_families.reverse();
+    for family in &mut reordered.relation_families {
+        family.facts.reverse();
+    }
+    reordered.bool_facts.reverse();
+    for fact in &mut reordered.bool_facts {
+        fact.observations.reverse();
+    }
+    reordered.supplied_entities.reverse();
+    reordered.integrity_constraints.reverse();
+    assert_eq!(
+        trace_binding_root(&plan, &reordered),
+        expected,
+        "permuting set-like request records must not churn the trace root"
+    );
+
+    let mut duplicated = input.clone();
+    let relation_fact = duplicated.relation_families[0].facts[0].clone();
+    duplicated.relation_families[0].facts.push(relation_fact);
+    let observation = duplicated.bool_facts[0].observations[0].clone();
+    duplicated.bool_facts[0].observations.push(observation);
+    let supplied = duplicated.supplied_entities[0].clone();
+    duplicated.supplied_entities.push(supplied);
+    let constraint = duplicated.integrity_constraints[0].clone();
+    duplicated.integrity_constraints.push(constraint);
+    assert_eq!(
+        trace_binding_root(&plan, &duplicated),
+        expected,
+        "exact duplicate records are one normalized observation"
+    );
+
+    assert_eq!(
+        expected,
+        "sha256:76b0ad50498beddd41b510b4315ab17e2dcc1e24e4623ecf445f8c8e27e9eab1"
+    );
+}
+
+#[test]
+fn trace_root_binds_compiled_semantics_and_every_constitution_input_surface() {
+    let plan = trace_binding_plan();
+    let input = trace_binding_input();
+    let baseline = trace_binding_root(&plan, &input);
+
+    let mut semantic_edit = plan.clone();
+    semantic_edit.derived_bools.push(DerivedBool {
+        id: "unused-but-semantic".to_string(),
+        stratum: Stratum::Person,
+        expr: BoolExpr::Literal(true),
+    });
+    assert_ne!(
+        trace_binding_root(&semantic_edit, &input),
+        baseline,
+        "compiled semantics digest is part of the trace commitment"
+    );
+
+    let mut mutations = Vec::<(&str, ConstitutionInput)>::new();
+
+    let mut changed = input.clone();
+    changed.roster.persons.push("c".to_string());
+    mutations.push(("roster members", changed));
+
+    let mut changed = input.clone();
+    changed.roster.completeness.as_mut().unwrap().id = "other-roster-evidence".to_string();
+    mutations.push(("roster completeness evidence", changed));
+
+    let mut changed = input.clone();
+    changed.segment = "2026-08-01/2026-08-31".to_string();
+    mutations.push(("segment", changed));
+
+    let mut changed = input.clone();
+    changed.relation_families[0].facts[0].observation.value = false;
+    mutations.push(("relation observation value", changed));
+
+    let mut changed = input.clone();
+    changed.relation_families[0].facts[0]
+        .observation
+        .evidence
+        .id = "other-relation-evidence".to_string();
+    mutations.push(("relation observation evidence", changed));
+
+    let mut changed = input.clone();
+    changed.relation_families[0]
+        .completeness
+        .as_mut()
+        .unwrap()
+        .citation
+        .authority = "other-relation-completeness-authority".to_string();
+    mutations.push(("relation completeness evidence", changed));
+
+    let mut changed = input.clone();
+    changed.relation_families[0].scope = "other-scope".to_string();
+    mutations.push(("relation scope", changed));
+
+    let mut changed = input.clone();
+    changed.bool_facts[0].observations[0].value = true;
+    mutations.push(("boolean observation value", changed));
+
+    let mut changed = input.clone();
+    changed.bool_facts[0].observations[0]
+        .evidence
+        .citation
+        .provision = "other-boolean-evidence".to_string();
+    mutations.push(("boolean observation evidence", changed));
+
+    let mut changed = input.clone();
+    changed.bool_facts[0].observations.clear();
+    changed.bool_facts[0].explicit_unknown = Some(evidence("explicit-status-unknown"));
+    mutations.push(("explicit Unknown evidence", changed));
+
+    let mut changed = input.clone();
+    changed.supplied_entities[0].evidence.id = "other-supplied-entity-evidence".to_string();
+    mutations.push(("supplied entity evidence", changed));
+
+    let mut changed = input.clone();
+    changed.integrity_constraints[0].citation.authority = "other-integrity-authority".to_string();
+    mutations.push(("integrity constraint", changed));
+
+    for (surface, changed) in mutations {
+        assert_ne!(
+            trace_binding_root(&plan, &changed),
+            baseline,
+            "changing {surface} must churn the trace root"
+        );
+    }
 }
 
 fn independent_lp(output: &mut Vec<u8>, value: &[u8]) {

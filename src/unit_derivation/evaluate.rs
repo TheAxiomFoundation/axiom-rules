@@ -1239,7 +1239,12 @@ fn assemble_result(
         .id
         .clone();
     for person in persons {
-        registry.bind_supplied("person", person.clone(), roster_evidence.clone())?;
+        let entity_type = input
+            .supplied_entities
+            .iter()
+            .find(|entity| entity.id == *person)
+            .map_or("person", |entity| entity.entity_type.as_str());
+        registry.bind_supplied(entity_type, person.clone(), roster_evidence.clone())?;
     }
 
     let mut units = Vec::new();
@@ -1461,15 +1466,335 @@ fn trace_root(
     worlds: usize,
     events: &BTreeSet<TraceEvent>,
 ) -> String {
-    let mut preimage = b"axiom.unit-derivation.trace.stage2\0".to_vec();
-    push_len_prefixed(&mut preimage, compiled.plan.id.as_bytes());
-    push_len_prefixed(&mut preimage, input.roster.scope.as_bytes());
-    push_len_prefixed(&mut preimage, input.segment.as_bytes());
-    preimage.extend_from_slice(&(worlds as u64).to_be_bytes());
-    for event in events {
-        push_len_prefixed(&mut preimage, format!("{event:?}").as_bytes());
+    let mut encoder = TraceEncoder::new(b"axiom.unit-derivation.trace.stage2\0");
+    encoder.fixed_bytes(&compiled.semantics_digest);
+    encoder.string(&compiled.plan.id);
+    encoder.constitution_input(input);
+    encoder.usize(worlds);
+    encoder.sorted_blobs(
+        events
+            .iter()
+            .map(|event| trace_blob(|encoder| encoder.trace_event(event)))
+            .collect(),
+    );
+    format!("sha256:{}", hex(&sha256(&encoder.finish())))
+}
+
+/// Structural, canonical encoding for the stage-2 trace commitment. Set-like
+/// request collections are sorted by their encoded bytes and exact duplicate
+/// records are removed, matching the binder's normalization. Tuple slots and
+/// expression children retain their authored order because that order is
+/// semantically meaningful. No `Debug` representation enters the preimage.
+struct TraceEncoder {
+    bytes: Vec<u8>,
+}
+
+impl TraceEncoder {
+    fn new(domain: &[u8]) -> Self {
+        Self {
+            bytes: domain.to_vec(),
+        }
     }
-    format!("sha256:{}", hex(&sha256(&preimage)))
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn bool(&mut self, value: bool) {
+        self.byte(u8::from(value));
+    }
+
+    fn usize(&mut self, value: usize) {
+        self.bytes.extend_from_slice(
+            &u64::try_from(value)
+                .expect("usize always fits into the trace encoding's u64 length")
+                .to_be_bytes(),
+        );
+    }
+
+    fn fixed_bytes(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.usize(value.len());
+        self.fixed_bytes(value);
+    }
+
+    fn string(&mut self, value: &str) {
+        self.bytes(value.as_bytes());
+    }
+
+    fn strings_in_order<'a>(&mut self, values: impl IntoIterator<Item = &'a String>) {
+        let values = values.into_iter().collect::<Vec<_>>();
+        self.usize(values.len());
+        for value in values {
+            self.string(value);
+        }
+    }
+
+    fn sorted_strings<'a>(&mut self, values: impl IntoIterator<Item = &'a String>) {
+        let mut values = values.into_iter().collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        self.usize(values.len());
+        for value in values {
+            self.string(value);
+        }
+    }
+
+    fn sorted_blobs(&mut self, mut values: Vec<Vec<u8>>) {
+        values.sort();
+        values.dedup();
+        self.usize(values.len());
+        for value in values {
+            self.bytes(&value);
+        }
+    }
+
+    fn option_string(&mut self, value: Option<&String>) {
+        match value {
+            Some(value) => {
+                self.byte(1);
+                self.string(value);
+            }
+            None => self.byte(0),
+        }
+    }
+
+    fn citation(&mut self, citation: &Citation) {
+        self.string(&citation.provision);
+        self.string(&citation.authority);
+    }
+
+    fn evidence(&mut self, evidence: &Evidence) {
+        self.string(&evidence.id);
+        self.citation(&evidence.citation);
+    }
+
+    fn option_evidence(&mut self, evidence: Option<&Evidence>) {
+        match evidence {
+            Some(evidence) => {
+                self.byte(1);
+                self.evidence(evidence);
+            }
+            None => self.byte(0),
+        }
+    }
+
+    fn observed_bool(&mut self, observation: &ObservedBool) {
+        self.bool(observation.value);
+        self.evidence(&observation.evidence);
+    }
+
+    fn bool_expr(&mut self, expr: &BoolExpr) {
+        match expr {
+            BoolExpr::Literal(value) => {
+                self.byte(0);
+                self.bool(*value);
+            }
+            BoolExpr::Fact(FactRef::Bool(name)) => {
+                self.byte(1);
+                self.string(name);
+            }
+            BoolExpr::Fact(FactRef::Relation { family, tuple }) => {
+                self.byte(2);
+                self.string(family);
+                self.strings_in_order(tuple);
+            }
+            BoolExpr::Derived(name) => {
+                self.byte(3);
+                self.string(name);
+            }
+            BoolExpr::And(items) => {
+                self.byte(4);
+                self.usize(items.len());
+                for item in items {
+                    self.bool_expr(item);
+                }
+            }
+            BoolExpr::Or(items) => {
+                self.byte(5);
+                self.usize(items.len());
+                for item in items {
+                    self.bool_expr(item);
+                }
+            }
+            BoolExpr::Not(item) => {
+                self.byte(6);
+                self.bool_expr(item);
+            }
+        }
+    }
+
+    fn constitution_input(&mut self, input: &ConstitutionInput) {
+        self.string(&input.roster.relation);
+        self.string(&input.roster.scope);
+        self.sorted_strings(&input.roster.persons);
+        self.option_evidence(input.roster.completeness.as_ref());
+        self.string(&input.segment);
+        self.bool(input.segment_complete);
+
+        self.sorted_blobs(
+            input
+                .relation_families
+                .iter()
+                .map(|family| {
+                    trace_blob(|encoder| {
+                        encoder.string(&family.name);
+                        encoder.string(&family.scope);
+                        encoder.option_evidence(family.completeness.as_ref());
+                        encoder.sorted_blobs(
+                            family
+                                .facts
+                                .iter()
+                                .map(|fact| {
+                                    trace_blob(|encoder| {
+                                        encoder.strings_in_order(&fact.tuple);
+                                        encoder.observed_bool(&fact.observation);
+                                    })
+                                })
+                                .collect(),
+                        );
+                    })
+                })
+                .collect(),
+        );
+
+        self.sorted_blobs(
+            input
+                .bool_facts
+                .iter()
+                .map(|fact| {
+                    trace_blob(|encoder| {
+                        encoder.string(&fact.name);
+                        encoder.sorted_blobs(
+                            fact.observations
+                                .iter()
+                                .map(|observation| {
+                                    trace_blob(|encoder| encoder.observed_bool(observation))
+                                })
+                                .collect(),
+                        );
+                        encoder.option_evidence(fact.explicit_unknown.as_ref());
+                    })
+                })
+                .collect(),
+        );
+
+        self.sorted_blobs(
+            input
+                .supplied_entities
+                .iter()
+                .map(|entity| {
+                    trace_blob(|encoder| {
+                        encoder.string(&entity.entity_type);
+                        encoder.string(&entity.id);
+                        encoder.evidence(&entity.evidence);
+                    })
+                })
+                .collect(),
+        );
+
+        self.sorted_blobs(
+            input
+                .integrity_constraints
+                .iter()
+                .map(|constraint| {
+                    trace_blob(|encoder| {
+                        encoder.string(&constraint.id);
+                        encoder.bool_expr(&constraint.expr);
+                        encoder.citation(&constraint.citation);
+                    })
+                })
+                .collect(),
+        );
+    }
+
+    fn trace_event(&mut self, event: &TraceEvent) {
+        match event {
+            TraceEvent::FrozenEdge { rule, left, right } => {
+                self.byte(0);
+                self.string(rule);
+                self.string(left);
+                self.string(right);
+            }
+            TraceEvent::CutApplied {
+                rule,
+                actor,
+                request_evidence,
+            } => {
+                self.byte(1);
+                self.string(rule);
+                self.option_string(actor.as_ref());
+                self.sorted_strings(request_evidence);
+            }
+            TraceEvent::CutBlocked {
+                cut,
+                edge_rule,
+                actor,
+                request_evidence,
+            } => {
+                self.byte(2);
+                self.string(cut);
+                self.string(edge_rule);
+                self.option_string(actor.as_ref());
+                self.sorted_strings(request_evidence);
+            }
+            TraceEvent::CutOverlapConflict { left, right } => {
+                self.byte(3);
+                self.string(left);
+                self.string(right);
+            }
+            TraceEvent::Attachment {
+                rule,
+                target_anchor,
+                actor,
+                request_evidence,
+            } => {
+                self.byte(4);
+                self.string(rule);
+                self.string(target_anchor);
+                self.string(actor);
+                self.sorted_strings(request_evidence);
+            }
+            TraceEvent::IndependentBar { rule } => {
+                self.byte(5);
+                self.string(rule);
+            }
+            TraceEvent::StatusExcluded { rule, person } => {
+                self.byte(6);
+                self.string(rule);
+                self.string(person);
+            }
+            TraceEvent::ElectionDefault {
+                fact,
+                actor,
+                value,
+                citation,
+            } => {
+                self.byte(7);
+                self.string(fact);
+                self.string(actor);
+                self.bool(*value);
+                self.citation(citation);
+            }
+            TraceEvent::DiscretionNotEncoded { persons } => {
+                self.byte(8);
+                self.sorted_strings(persons);
+            }
+        }
+    }
+}
+
+fn trace_blob(encode: impl FnOnce(&mut TraceEncoder)) -> Vec<u8> {
+    let mut encoder = TraceEncoder::new(&[]);
+    encode(&mut encoder);
+    encoder.finish()
 }
 
 /// Content-derived identity from the fixed stage-2 preimage:

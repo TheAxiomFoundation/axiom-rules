@@ -15,6 +15,9 @@
 //!   consumers. `compiled-artifact.v1` remains published unchanged so stored
 //!   v1 artifacts have a stable historical schema, but this engine does not
 //!   execute them.
+//! - With both `schema` and `unit-derivation` enabled, four explicitly
+//!   experimental stage-3 schemas cover the aggregation authoring plan,
+//!   compiled artifact, Knowledge-valued request, and Knowledge-valued result.
 //!
 //! Fidelity is the whole point: a file that serde deserializes MUST validate
 //! against its schema, and a file that validates MUST deserialize. That goal
@@ -58,7 +61,7 @@ const CORPUS_CITATION_PATH_PATTERN: &str = "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z
 /// byte-identical; the `emit-schemas` CLI subcommand writes the same set.
 #[cfg(feature = "schema")]
 pub fn all_schemas() -> Vec<NamedSchema> {
-    vec![
+    let mut schemas = vec![
         NamedSchema {
             file_name: "rulespec-module.v1.schema.json",
             schema: rulespec_module_schema(),
@@ -75,7 +78,27 @@ pub fn all_schemas() -> Vec<NamedSchema> {
             file_name: "compiled-artifact.v2.schema.json",
             schema: compiled_artifact_schema(),
         },
-    ]
+    ];
+    #[cfg(feature = "unit-derivation")]
+    schemas.extend([
+        NamedSchema {
+            file_name: "experimental-unit-aggregation-plan.stage3.schema.json",
+            schema: unit_aggregation_plan_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-unit-aggregation.stage3.schema.json",
+            schema: compiled_unit_aggregation_schema(),
+        },
+        NamedSchema {
+            file_name: "unit-aggregation-request.stage3.schema.json",
+            schema: unit_aggregation_request_schema(),
+        },
+        NamedSchema {
+            file_name: "unit-aggregation-result.stage3.schema.json",
+            schema: unit_aggregation_result_schema(),
+        },
+    ]);
+    schemas
 }
 
 /// Serialize a schema to the canonical on-disk text: pretty-printed with two
@@ -145,6 +168,92 @@ pub fn compiled_artifact_schema() -> Value {
          version. Produced by `axiom-rules-engine compile`.",
     );
     schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn unit_aggregation_plan_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::unit_derivation::AggregationPlan))
+        .expect("unit aggregation plan schema serializes");
+    set_property_const(
+        &mut schema,
+        "schema",
+        crate::unit_derivation::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA,
+    );
+    stamp_meta(
+        &mut schema,
+        "experimental-unit-aggregation-plan.stage3",
+        "Experimental unit aggregation plan",
+        "Feature-gated authoring document compiled into a canonically digested unit aggregation artifact.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn compiled_unit_aggregation_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(
+        crate::unit_derivation::CompiledAggregationArtifact
+    ))
+    .expect("compiled unit aggregation schema serializes");
+    set_property_const(
+        &mut schema,
+        "format",
+        crate::unit_derivation::COMPILED_AGGREGATION_ARTIFACT_FORMAT,
+    );
+    set_property_const(
+        &mut schema,
+        "semantics_version",
+        crate::unit_derivation::EXPERIMENTAL_SEMANTICS_VERSION,
+    );
+    stamp_meta(
+        &mut schema,
+        "compiled-unit-aggregation.stage3",
+        "Compiled experimental unit aggregation artifact",
+        "Feature-gated, canonically digested aggregation plan with an embedded production-validated phase-two artifact.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn unit_aggregation_request_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::unit_derivation::AggregationRequest))
+        .expect("unit aggregation request schema serializes");
+    stamp_meta(
+        &mut schema,
+        "unit-aggregation-request.stage3",
+        "Experimental unit aggregation request",
+        "Evidence-bearing Knowledge-valued roster, relationship, person, child, and family inputs.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn unit_aggregation_result_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::unit_derivation::AggregationResult))
+        .expect("unit aggregation result schema serializes");
+    set_property_const(
+        &mut schema,
+        "schema",
+        crate::unit_derivation::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA,
+    );
+    stamp_meta(
+        &mut schema,
+        "unit-aggregation-result.stage3",
+        "Experimental unit aggregation result",
+        "Knowledge-valued family aggregation outputs with canonical plan and request-bound trace digests.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+fn set_property_const(schema: &mut Value, property: &str, value: &str) {
+    if let Some(property_schema) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut(property))
+        .and_then(Value::as_object_mut)
+    {
+        property_schema.insert("const".to_string(), json!(value));
+    }
 }
 
 #[cfg(feature = "schema")]
