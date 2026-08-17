@@ -1,0 +1,128 @@
+# Experimental stage-3 plan for the pinned NZ IncomeExplorer comparison only.
+#
+# There is no Tier-B SNAP legal reading here. `partner_of` and
+# `dependent_child_of` are explicit, complete scenario facts. Their cited NZ
+# provisions determine which family/person or family/child projection consumes
+# those facts; the engine does not infer relationship status from age or income.
+schema: axiom/unit-aggregation-plan-stage3/1
+id: nz:incomeexplorer:family-aggregation-2026-27
+# Reproduce the pinned comparison's explicit Python Decimal context. This is a
+# numeric transport input, not a legal-family interpretation.
+decimal_precision: 40
+constitution:
+  id: nz:income-tax:family-unit-2026-27
+  entity_type: Family
+  roster_relation: nz:incomeexplorer#scenario_person
+  unit_constituent_relation: nz:incomeexplorer#family_member
+  participating_member_relation: nz:incomeexplorer#family_scheme_member
+membership_relations:
+  - relation: partner_of
+    symmetric: true
+    citation:
+      provision: Income Tax Act 2007 ss MB 2 and MC 2
+      authority: nz/statute/act/public/2007/0097/section/mb-2
+  - relation: dependent_child_of
+    symmetric: false
+    citation:
+      provision: Income Tax Act 2007 ss MC 2, MC 6, MC 9, and MC 10
+      authority: nz/statute/act/public/2007/0097/section/mc-2
+partner_relation: partner_of
+child_relation: dependent_child_of
+scalar_aggregations:
+  - output: weekly_wages
+    input: weekly_wage
+    selector: adults
+    citation: &mb2
+      provision: Income Tax Act 2007 s MB 2
+      authority: nz/statute/act/public/2007/0097/section/mb-2
+  - output: annual_wages
+    input: annual_wage
+    selector: adults
+    citation: *mb2
+  - output: annual_family_scheme_base_income
+    input: annual_family_scheme_base_income
+    selector: adults
+    citation: *mb2
+  - output: weekly_net_benefit
+    input: weekly_net_benefit
+    selector: adults
+    citation:
+      provision: Social Security Act 2018 main-benefit family rate provisions
+      authority: nz/statute/act/public/2018/0032/schedule/4
+  - output: weekly_gross_benefit
+    input: weekly_gross_benefit
+    selector: adults
+    citation: *mb2
+  - output: weekly_wage_tax
+    input: weekly_wage_tax
+    selector: adults
+    citation:
+      provision: Income Tax Act 2007 Schedule 1 and s MB 2
+      authority: nz/statute/act/public/2007/0097/schedule/1
+  - output: weekly_net_wage
+    input: weekly_net_wage
+    selector: adults
+    citation:
+      provision: Income Tax Act 2007 Schedule 1; Accident Compensation Act 2001 s 219
+      authority: nz/statute/act/public/2007/0097/schedule/1
+  - output: hours_total
+    input: weekly_hours
+    selector: adults
+    citation:
+      provision: Income Tax Act 2007 ss MD 9 and ME 1
+      authority: nz/statute/act/public/2007/0097/section/md-9
+  - output: ietc_weekly
+    input: ietc_weekly
+    selector: adults
+    citation:
+      provision: Income Tax Act 2007 s LC 13
+      authority: nz/statute/act/public/2007/0097/section/lc-13
+  - output: ietc_continuous_weekly
+    input: ietc_continuous_weekly
+    selector: adults
+    citation:
+      provision: Income Tax Act 2007 s LC 13
+      authority: nz/statute/act/public/2007/0097/section/lc-13
+child_counts:
+  - output: dependent_child_count
+    citation: &mc2
+      provision: Income Tax Act 2007 ss MC 2, MC 6, and MC 9
+      authority: nz/statute/act/public/2007/0097/section/mc-2
+  - output: best_start_eligible_child_count
+    minimum_age: 0
+    maximum_age: 2
+    citation:
+      provision: Income Tax Act 2007 ss MC 6(c), MC 8, MG 1, and MG 2
+      authority: nz/statute/act/public/2007/0097/section/mg-2
+  - output: child_count_age_0_13
+    minimum_age: 0
+    maximum_age: 13
+    citation: *mc2
+  - output: child_count_age_14_18
+    minimum_age: 14
+    maximum_age: 18
+    citation:
+      provision: Income Tax Act 2007 s MC 9(1)
+      authority: nz/statute/act/public/2007/0097/section/mc-9
+child_minima:
+  - output: youngest_child_age
+    input: age_years
+    empty_value: 0
+    citation: *mc2
+broadcasts:
+  - output: family_scheme_income
+    family_input: family_scheme_income
+    citation:
+      provision: Income Tax Act 2007 ss MB 2 and MG 3
+      authority: nz/statute/act/public/2007/0097/section/mg-3
+family_reductions:
+  - output: best_start_total
+    gross_output: best_start_total_before_abatement
+    operation: sum_children_then_subtract_family_once
+    child_value: best_start_before_abatement
+    family_once_value: best_start_family_abatement
+    minimum_age: 0
+    maximum_age: 2
+    citation:
+      provision: Income Tax Act 2007 ss MG 1, MG 2, and MG 3
+      authority: nz/statute/act/public/2007/0097/section/mg-3

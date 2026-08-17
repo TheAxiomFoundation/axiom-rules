@@ -89,6 +89,7 @@ version = "0.2.1"
 dependencies = [
  "chrono",
  "jsonschema",
+ "num-bigint",
  "rust_decimal",
  "rust_decimal_macros",
  "schemars",

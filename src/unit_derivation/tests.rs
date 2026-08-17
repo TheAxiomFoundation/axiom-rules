@@ -1148,6 +1148,135 @@ fn invariant_normalized_input_conflict_is_classified_per_affected_projection() {
     );
 }
 
+fn nz_person(id: &str, age_years: i64, values: &[(&str, &str)]) -> AggregationPerson {
+    AggregationPerson {
+        id: id.to_string(),
+        age_years: Some(age_years),
+        scalars: values
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+    }
+}
+
+fn nz_values<'a>(
+    weekly_wage: &'a str,
+    annual_wage: &'a str,
+    base_income: &'a str,
+    before: &'a str,
+    abatement: &'a str,
+) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("weekly_wage", weekly_wage),
+        ("annual_wage", annual_wage),
+        ("annual_family_scheme_base_income", base_income),
+        ("weekly_net_benefit", "0"),
+        ("weekly_gross_benefit", "0"),
+        ("weekly_wage_tax", "0"),
+        ("weekly_net_wage", weekly_wage),
+        ("weekly_hours", "40"),
+        ("ietc_weekly", "0"),
+        ("ietc_continuous_weekly", "0"),
+        ("best_start_before_abatement", before),
+        ("best_start_family_abatement", abatement),
+    ]
+}
+
+#[test]
+fn nz_family_fixture_moves_person_child_aggregation_behind_the_barrier() {
+    let plan = parse_aggregation_plan(include_str!(
+        "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
+    ))
+    .unwrap();
+    let primary_values = nz_values(
+        "1000.12345678901234567890123456789012345",
+        "52000",
+        "52000",
+        "0",
+        "0",
+    );
+    let partner_values = nz_values(
+        "740.87654321098765432109876543210987655",
+        "38480",
+        "38480",
+        "0",
+        "0",
+    );
+    let child_one_values = nz_values("0", "0", "0", "4041", "1000");
+    let child_two_values = nz_values("0", "0", "0", "4041", "1000");
+    let request = AggregationRequest {
+        scope: "scenario:binding-best-start".to_string(),
+        segment: "2026-04-01/2027-03-31".to_string(),
+        primary_person: "primary".to_string(),
+        persons: vec![
+            nz_person("primary", 25, &primary_values),
+            nz_person("partner", 25, &partner_values),
+            nz_person("child-0", 1, &child_one_values),
+            nz_person("child-1", 2, &child_two_values),
+        ],
+        relations: BTreeMap::from([
+            (
+                "partner_of".to_string(),
+                vec![["primary".to_string(), "partner".to_string()]],
+            ),
+            (
+                "dependent_child_of".to_string(),
+                vec![
+                    ["primary".to_string(), "child-0".to_string()],
+                    ["primary".to_string(), "child-1".to_string()],
+                ],
+            ),
+        ]),
+        family_scalars: BTreeMap::from([("family_scheme_income".to_string(), "90480".to_string())]),
+    };
+    let result = execute_aggregation_plan(&plan, &request, &enabled()).unwrap();
+    assert_eq!(result.families.len(), 1);
+    let family = &result.families[0];
+    assert!(family.partner_present);
+    assert_eq!(family.counts["dependent_child_count"], 2);
+    assert_eq!(family.counts["best_start_eligible_child_count"], 2);
+    assert_eq!(family.counts["youngest_child_age"], 1);
+    assert_eq!(family.scalars["weekly_wages"], "1741");
+    assert_eq!(family.scalars["annual_family_scheme_base_income"], "90480");
+    assert_eq!(family.scalars["best_start_total"], "7082");
+    assert_eq!(family.scalars["best_start_total_before_abatement"], "8082");
+    assert!(family.children.iter().all(|child| {
+        child.scalars["family_scheme_income"] == "90480"
+            && child.age_bands["best_start_eligible_child_count"]
+            && child.family == family.id
+    }));
+
+    let disabled = execute_aggregation_plan(&plan, &request, &Default::default())
+        .expect_err("aggregation retains the independent runtime gate");
+    assert_eq!(disabled, UnitDerivationError::Disabled);
+}
+
+#[test]
+fn nz_best_start_host_defect_reproduces_but_plan_has_no_per_child_abatement_operator() {
+    let before = rust_decimal::Decimal::from(4041);
+    let abatement = rust_decimal::Decimal::from(1000);
+    let two = rust_decimal::Decimal::from(2);
+    let host_per_child = (before - abatement).max(rust_decimal::Decimal::ZERO) * two;
+    let family_once = (before * two - abatement).max(rust_decimal::Decimal::ZERO);
+    assert_eq!(host_per_child, rust_decimal::Decimal::from(6082));
+    assert_eq!(family_once, rust_decimal::Decimal::from(7082));
+
+    let invalid =
+        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml")
+            .replace(
+                "sum_children_then_subtract_family_once",
+                "sum_per_child_after_abatement",
+            );
+    let error = parse_aggregation_plan(&invalid)
+        .expect_err("the public plan grammar has no per-child abatement reducer");
+    assert!(matches!(
+        error,
+        UnitDerivationError::InvalidPlan(message)
+            if message.contains("invalid aggregation plan YAML")
+                && message.contains("sum_per_child_after_abatement")
+    ));
+}
+
 #[test]
 fn identity_preimage_is_order_invariant_and_matches_the_frozen_vector() {
     let first = unit_id(

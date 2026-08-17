@@ -5,6 +5,7 @@
 //! deliberately does not change RuleSpec, artifact v2, the ordinary engine,
 //! or any release/launch surface.
 
+mod aggregation;
 mod compile;
 mod evaluate;
 mod interface;
@@ -12,6 +13,10 @@ mod interface;
 mod tests;
 mod types;
 
+pub use aggregation::{
+    AggregationPerson, AggregationPlan, AggregationRequest, AggregationResult,
+    execute_aggregation_plan, parse_aggregation_plan,
+};
 pub use compile::{CompiledConstitution, compile};
 pub use evaluate::{derive_units, unit_id};
 pub use interface::{
@@ -23,3 +28,8 @@ pub use types::*;
 /// Experimental identity required by the prototype interface. This value is
 /// intentionally not an artifact-format or release-line version.
 pub const EXPERIMENTAL_SEMANTICS_VERSION: &str = "unit-derivation-stage2/1";
+
+/// Separate experimental document identity for the stage-3 projection layer.
+/// It is not an artifact-format version and is unavailable without the
+/// off-by-default `unit-derivation` Cargo feature.
+pub const EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA: &str = "axiom/unit-aggregation-plan-stage3/1";

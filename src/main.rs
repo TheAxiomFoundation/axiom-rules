@@ -48,6 +48,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "compile" => return run_compile(args.collect(), false),
             "compile-composed" => return run_compile(args.collect(), true),
             "run-compiled" => return run_compiled(args.collect()),
+            #[cfg(feature = "unit-derivation")]
+            "run-unit-aggregation" => return run_unit_aggregation(args.collect()),
             #[cfg(feature = "schema")]
             "emit-schemas" => return run_emit_schemas(args.collect()),
             "migrate" => return run_migrate(args.collect()),
@@ -259,6 +261,62 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let request: CompiledExecutionRequest = serde_json::from_str(&input)?;
     let response = execute_compiled_request(artifact, request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+#[cfg(feature = "unit-derivation")]
+const UNIT_AGGREGATION_USAGE: &str = "\
+usage: axiom-rules-engine run-unit-aggregation --plan <plan.yaml> --enable-experimental-unit-derivation < request.json
+
+This command is compiled only with the off-by-default `unit-derivation` Cargo
+feature. The explicit runtime switch is also mandatory. Its plan and result
+use the named experimental channel, never compiled artifact v2.";
+
+#[cfg(feature = "unit-derivation")]
+fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut plan_path: Option<PathBuf> = None;
+    let mut enabled = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--plan" => {
+                plan_path = Some(PathBuf::from(
+                    iter.next().ok_or("`--plan` requires a path argument")?,
+                ));
+            }
+            "--enable-experimental-unit-derivation" => enabled = true,
+            "--help" | "-h" => {
+                println!("{UNIT_AGGREGATION_USAGE}");
+                return Ok(());
+            }
+            _ => {
+                return Err(format!(
+                    "unknown run-unit-aggregation argument `{arg}`\n{UNIT_AGGREGATION_USAGE}"
+                )
+                .into());
+            }
+        }
+    }
+    if !enabled {
+        return Err(
+            "unit derivation is disabled; pass --enable-experimental-unit-derivation explicitly"
+                .into(),
+        );
+    }
+    let plan_path = plan_path.ok_or("missing required `--plan /path/to/plan.yaml` argument")?;
+    let plan_source = std::fs::read_to_string(plan_path)?;
+    let plan = axiom_rules_engine::unit_derivation::parse_aggregation_plan(&plan_source)?;
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    let request: axiom_rules_engine::unit_derivation::AggregationRequest =
+        serde_json::from_str(&input)?;
+    let config = axiom_rules_engine::unit_derivation::UnitDerivationConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let result =
+        axiom_rules_engine::unit_derivation::execute_aggregation_plan(&plan, &request, &config)?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
