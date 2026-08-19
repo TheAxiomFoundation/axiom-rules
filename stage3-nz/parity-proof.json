@@ -1,13 +1,13 @@
 {
   "schema": "axiom.stage3-nz.adversarial-cure-proof.v1",
   "ops_harness_base_commit": "bcf631b5",
-  "certified_engine_commit": "d8d45a817b3700ed22ec49a9fcf1024aa6ed2198",
-  "certified_engine_binary_sha256": "c5a3d3d8b1fdb8480bef7cffc6dd85658ca1a48cf7ca70da968b7a46c1e8a430",
+  "certified_engine_commit": "d9069693e92ee338ab2c1d62461e73bcb02f195d",
+  "certified_engine_binary_sha256": "3a37cd2bfa570569252b97ac0f563fcf089fd97f43b208943c15ae28bb445e34",
   "engine_checkout_cleanliness": "tracked_and_untracked_nonignored",
-  "aggregation_plan_sha256": "4a0a53cdb3f6e41a3ac203e324c30871f967de397153f84c040c7d1de12a1ba3",
-  "ops_harness_patch_sha256": "9a98f3def4f4a734d69ca9563ed3bb09ab90a3a2b36c7ef68ea87cd39a0d6bab",
+  "aggregation_plan_sha256": "311f64cb64c3b5a4b0f49fd2ff634cda43cb327d4a148683784a8fe1705787a6",
+  "ops_harness_patch_sha256": "11018bb4eb935bbb27ac1ce80e5dd008da045d0d28827c64cf0dfbbb6745087a",
   "flag_off": {
-    "parent_commit": "74881519c829106e4e696d77b38e10ba61c881d8",
+    "parent_commit": "d32cf980bdd5a3b7a7e582604dffa90687784b69",
     "parent_artifact_sha256": "355659bf30cef49c440d5fa24014f1bf6c9a17964befb164880196950462f3b2",
     "current_artifact_sha256": "355659bf30cef49c440d5fa24014f1bf6c9a17964befb164880196950462f3b2",
     "artifact_byte_identical": true,
@@ -22,12 +22,12 @@
       "ignored": 0
     },
     "cargo_test_unit_derivation": {
-      "passed": 328,
+      "passed": 331,
       "failed": 0,
       "ignored": 0
     },
     "cargo_test_all_features": {
-      "passed": 344,
+      "passed": 347,
       "failed": 0,
       "ignored": 0
     },
@@ -54,7 +54,7 @@
     "comparison_csv_sha256_prior_review": "ccaa4dcb61b112587b47afb0e1892f670df354670fcd35f4d801edc621dd4bf2",
     "comparison_csv_byte_identical": true,
     "compiled_program_artifact_sha256": "355659bf30cef49c440d5fa24014f1bf6c9a17964befb164880196950462f3b2",
-    "compiled_unit_aggregation_artifact_sha256": "dc1d368844e071c17649cd463568eca5e1d82eacf822694cce0ac45f1882fc41",
+    "compiled_unit_aggregation_artifact_sha256": "46d9bb6cbd03d69cde3419b409225e62f23f43056fc9133340b0c7138eba4f2c",
     "ordinary_engine_evaluations_per_fresh_run": 881,
     "unit_aggregation_evaluations_per_fresh_run": 1411,
     "disposition_identity": {
