@@ -112,6 +112,16 @@
         "citation": {
           "$ref": "#/$defs/AggregationCitation"
         },
+        "engine_computation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EngineComputationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/AggregationInputKind"
         },
@@ -349,7 +359,7 @@
               "authority": "",
               "provision": ""
             },
-            "entitlement_holder_input": ""
+            "reference_person_input": ""
           }
         },
         "partner_relation": {
@@ -871,6 +881,18 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "EngineComputationBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id"
+      ],
       "type": "object"
     },
     "FamilyPredicate": {
@@ -1503,12 +1525,12 @@
         "citation": {
           "$ref": "#/$defs/AggregationCitation"
         },
-        "entitlement_holder_input": {
+        "reference_person_input": {
           "type": "string"
         }
       },
       "required": [
-        "entitlement_holder_input",
+        "reference_person_input",
         "citation",
         "caller_determination"
       ],
@@ -2439,6 +2461,12 @@
     "semantics_version": {
       "const": "unit-derivation-stage2/1",
       "type": "string"
+    },
+    "source_artifact": {
+      "$ref": "#/$defs/CompiledProgramArtifact"
+    },
+    "source_artifact_digest": {
+      "type": "string"
     }
   },
   "required": [
@@ -2446,7 +2474,9 @@
     "semantics_version",
     "plan_digest",
     "constitution_digest",
+    "source_artifact_digest",
     "plan",
+    "source_artifact",
     "phase_two_artifact"
   ],
   "title": "Compiled experimental unit aggregation artifact",

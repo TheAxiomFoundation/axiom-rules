@@ -1,13 +1,13 @@
 {
   "schema": "axiom/unit-aggregation-plan-stage3/1",
   "plan": "nz:incomeexplorer:family-aggregation-2026-27",
-  "plan_digest": "sha256:91324344f6eec3c64e34b99702cd7a0ac0e1a8402a2d8b814b58a672c708dc7c",
-  "trace_root": "sha256:af25a06a5aa58119a024f3d7aec51cb4d1fa754832569cf14e13976d2025f20e",
+  "plan_digest": "sha256:e0a833232e758efbe1da4a6212cb93906719e62a6f9298909169d71f1db64b6c",
+  "trace_root": "sha256:80ed812db8a13e57b708218c0d6a3320dd59915494374e1c942eb9cc06b34085",
   "families": {
     "status": "determined",
     "value": [
       {
-        "id": "Family:sha256:4c187a40837d65b23958d64aef28befd0ac5ce7704c39f19fe364d508b1bd7bd",
+        "id": "Family:sha256:60490911749d9bc93f5a692773d70ff5da97d9e86fcc5ea558f02faeabbca18d",
         "members": [
           "child-0",
           "child-1",
@@ -147,7 +147,7 @@
         "children": [
           {
             "person": "child-0",
-            "family": "Family:sha256:4c187a40837d65b23958d64aef28befd0ac5ce7704c39f19fe364d508b1bd7bd",
+            "family": "Family:sha256:60490911749d9bc93f5a692773d70ff5da97d9e86fcc5ea558f02faeabbca18d",
             "age_years": {
               "status": "determined",
               "value": 1
@@ -183,7 +183,7 @@
           },
           {
             "person": "child-1",
-            "family": "Family:sha256:4c187a40837d65b23958d64aef28befd0ac5ce7704c39f19fe364d508b1bd7bd",
+            "family": "Family:sha256:60490911749d9bc93f5a692773d70ff5da97d9e86fcc5ea558f02faeabbca18d",
             "age_years": {
               "status": "determined",
               "value": 2

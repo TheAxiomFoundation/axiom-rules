@@ -478,7 +478,17 @@ pub enum UnitDerivationError {
         found: String,
     },
     #[error(
-        "relationship `{relation}` assigns entitlement holder `{person}` the forbidden role `{role}`"
+        "child-gross operand `{input}` for `{operation}` on child `{child}` has provenance `{found}`, expected `{expected}`"
+    )]
+    InvalidChildGrossProvenance {
+        operation: String,
+        input: String,
+        child: String,
+        expected: String,
+        found: String,
+    },
+    #[error(
+        "relationship `{relation}` assigns family reference person `{person}` the forbidden role `{role}`"
     )]
     InvalidRelationshipRole {
         relation: String,

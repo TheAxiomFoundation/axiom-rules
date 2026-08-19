@@ -447,15 +447,17 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "unit-derivation")]
 const COMPILE_UNIT_AGGREGATION_USAGE: &str = "\
-usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --output <compiled-aggregation.json>
+usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --source-artifact <compiled-program.json> --output <compiled-aggregation.json>
 
 The authoring YAML is accepted only at this compile boundary. The output is a
 canonically digested experimental artifact containing a production-validated
-phase-two program; run-unit-aggregation accepts only that compiled artifact.";
+source program and phase-two program; run-unit-aggregation accepts only that
+compiled artifact.";
 
 #[cfg(feature = "unit-derivation")]
 fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut plan_path: Option<PathBuf> = None;
+    let mut source_artifact_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -468,6 +470,12 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
             "--output" => {
                 output_path = Some(PathBuf::from(
                     iter.next().ok_or("`--output` requires a path argument")?,
+                ));
+            }
+            "--source-artifact" => {
+                source_artifact_path = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or("`--source-artifact` requires a path argument")?,
                 ));
             }
             "--help" | "-h" => {
@@ -483,12 +491,15 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
         }
     }
     let plan_path = plan_path.ok_or("missing required `--plan /path/to/plan.yaml` argument")?;
+    let source_artifact_path = source_artifact_path
+        .ok_or("missing required `--source-artifact /path/to/compiled-program.json` argument")?;
     let output_path = output_path
         .ok_or("missing required `--output /path/to/compiled-aggregation.json` argument")?;
     let source = std::fs::read_to_string(&plan_path)?;
+    let source_artifact = CompiledProgramArtifact::from_json_file(&source_artifact_path)?;
     let mut registry =
         axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
-    let artifact = registry.register_aggregation_source(&source)?;
+    let artifact = registry.register_aggregation_source(&source, &source_artifact)?;
     std::fs::write(&output_path, artifact.to_json_pretty()?)?;
     println!("compiled_unit_aggregation: {}", output_path.display());
     println!("plan: {}", artifact.plan_id());

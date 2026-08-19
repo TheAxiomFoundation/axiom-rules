@@ -5,12 +5,12 @@
       "properties": {
         "age_bands": {
           "additionalProperties": {
-            "$ref": "#/$defs/AggregationValue2"
+            "$ref": "#/$defs/AggregationValue"
           },
           "type": "object"
         },
         "age_years": {
-          "$ref": "#/$defs/AggregationValue4"
+          "$ref": "#/$defs/AggregationValue3"
         },
         "family": {
           "type": "string"
@@ -20,7 +20,7 @@
         },
         "scalars": {
           "additionalProperties": {
-            "$ref": "#/$defs/AggregationValue3"
+            "$ref": "#/$defs/AggregationValue2"
           },
           "type": "object"
         }
@@ -45,7 +45,7 @@
         },
         "counts": {
           "additionalProperties": {
-            "$ref": "#/$defs/AggregationValue4"
+            "$ref": "#/$defs/AggregationValue3"
           },
           "type": "object"
         },
@@ -59,17 +59,17 @@
           "type": "array"
         },
         "partner_present": {
-          "$ref": "#/$defs/AggregationValue2"
+          "$ref": "#/$defs/AggregationValue"
         },
         "predicates": {
           "additionalProperties": {
-            "$ref": "#/$defs/AggregationValue2"
+            "$ref": "#/$defs/AggregationValue"
           },
           "type": "object"
         },
         "scalars": {
           "additionalProperties": {
-            "$ref": "#/$defs/AggregationValue3"
+            "$ref": "#/$defs/AggregationValue2"
           },
           "type": "object"
         }
@@ -85,7 +85,7 @@
       ],
       "type": "object"
     },
-    "AggregationValue": {
+    "AggregationFamilyKnowledge": {
       "oneOf": [
         {
           "additionalProperties": false,
@@ -120,6 +120,15 @@
             "status": {
               "const": "indeterminate",
               "type": "string"
+            },
+            "value": {
+              "items": {
+                "$ref": "#/$defs/AggregatedFamily"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             }
           },
           "required": [
@@ -130,7 +139,7 @@
         }
       ]
     },
-    "AggregationValue2": {
+    "AggregationValue": {
       "oneOf": [
         {
           "additionalProperties": false,
@@ -172,7 +181,7 @@
         }
       ]
     },
-    "AggregationValue3": {
+    "AggregationValue2": {
       "oneOf": [
         {
           "additionalProperties": false,
@@ -214,7 +223,7 @@
         }
       ]
     },
-    "AggregationValue4": {
+    "AggregationValue3": {
       "oneOf": [
         {
           "additionalProperties": false,
@@ -264,7 +273,7 @@
   "description": "Knowledge-valued family aggregation outputs with canonical plan and request-bound trace digests.",
   "properties": {
     "families": {
-      "$ref": "#/$defs/AggregationValue"
+      "$ref": "#/$defs/AggregationFamilyKnowledge"
     },
     "plan": {
       "type": "string"

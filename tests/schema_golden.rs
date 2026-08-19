@@ -22,6 +22,24 @@ fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas")
 }
 
+#[cfg(feature = "unit-derivation")]
+struct NzGrossModuleSource;
+
+#[cfg(feature = "unit-derivation")]
+impl axiom_rules_engine::source::ModuleSource for NzGrossModuleSource {
+    fn load(
+        &self,
+        target: &str,
+    ) -> Result<Option<String>, axiom_rules_engine::source::SourceError> {
+        Ok(
+            (target == "nz:statutes/income_tax/family_scheme/tax_credits").then(|| {
+                include_str!("fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml")
+                    .to_string()
+            }),
+        )
+    }
+}
+
 #[test]
 fn schemas_are_current() {
     let dir = schemas_dir();
@@ -101,9 +119,16 @@ fn experimental_unit_aggregation_schemas_accept_the_exact_cli_fixtures() {
             .expect("aggregation request fixture is readable");
     let plan: AggregationPlan = serde_yaml::from_str(&source).unwrap();
     let request: AggregationRequest = serde_json::from_str(&request_source).unwrap();
+    let source_artifact = CompiledProgramArtifact::from_rulespec_with_source(
+        "nz:statutes/income_tax/family_scheme/tax_credits",
+        &NzGrossModuleSource,
+    )
+    .unwrap();
     let mut registry = UnitDerivationDocumentRegistry::default();
     let (plan_id, artifact_json) = {
-        let artifact = registry.register_aggregation_source(&source).unwrap();
+        let artifact = registry
+            .register_aggregation_source(&source, &source_artifact)
+            .unwrap();
         (
             artifact.plan_id().to_string(),
             serde_json::to_value(artifact).unwrap(),

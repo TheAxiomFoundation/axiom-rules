@@ -15,10 +15,11 @@ mod types;
 
 pub use aggregation::{
     AggregatedChild, AggregatedFamily, AggregationEvidence, AggregationFamilyInput,
-    AggregationKnowledge, AggregationObservation, AggregationPerson, AggregationPersonRole,
-    AggregationPlan, AggregationRelationFact, AggregationRelationFamily, AggregationRequest,
-    AggregationResult, AggregationValue, COMPILED_AGGREGATION_ARTIFACT_FORMAT,
-    CompiledAggregationArtifact, UnitDerivationDocumentRegistry,
+    AggregationFamilyKnowledge, AggregationKnowledge, AggregationObservation, AggregationPerson,
+    AggregationPersonRole, AggregationPlan, AggregationRelationFact, AggregationRelationFamily,
+    AggregationRequest, AggregationResult, AggregationValue, COMPILED_AGGREGATION_ARTIFACT_FORMAT,
+    CompiledAggregationArtifact, EngineComputationBinding, EngineComputationRequest,
+    EngineComputationStage, UnitDerivationDocumentRegistry,
 };
 #[cfg(test)]
 pub(crate) use aggregation::{compile_aggregation_plan, execute_aggregation_plan};

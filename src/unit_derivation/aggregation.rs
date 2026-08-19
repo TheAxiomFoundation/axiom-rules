@@ -93,7 +93,23 @@ pub struct AggregationInput {
     pub kind: AggregationInputKind,
     #[serde(default)]
     pub reduction_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_computation: Option<EngineComputationBinding>,
     pub citation: AggregationCitation,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EngineComputationBinding {
+    pub rule_id: String,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineComputationStage {
+    Gross,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -147,7 +163,7 @@ impl AggregationMembershipRelation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartnerPresenceRule {
-    pub entitlement_holder_input: String,
+    pub reference_person_input: String,
     pub citation: AggregationCitation,
     pub caller_determination: String,
 }
@@ -155,7 +171,7 @@ pub struct PartnerPresenceRule {
 impl Default for PartnerPresenceRule {
     fn default() -> Self {
         Self {
-            entitlement_holder_input: String::new(),
+            reference_person_input: String::new(),
             citation: AggregationCitation::default(),
             caller_determination: String::new(),
         }
@@ -510,6 +526,15 @@ pub struct AggregationPerson {
     pub scalars: BTreeMap<String, AggregationKnowledge<String>>,
     #[serde(default)]
     pub facts: BTreeMap<String, AggregationKnowledge<bool>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub engine_computations: BTreeMap<String, EngineComputationRequest>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EngineComputationRequest {
+    pub dataset: crate::spec::DatasetSpec,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -551,13 +576,47 @@ impl<T> AggregationValue<T> {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AggregationFamilyKnowledge {
+    Determined {
+        value: Vec<AggregatedFamily>,
+    },
+    Indeterminate {
+        reasons: BTreeSet<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<Vec<AggregatedFamily>>,
+    },
+}
+
+impl AggregationFamilyKnowledge {
+    fn determined(value: Vec<AggregatedFamily>) -> Self {
+        Self::Determined { value }
+    }
+
+    fn indeterminate(reasons: BTreeSet<String>) -> Self {
+        Self::Indeterminate {
+            reasons,
+            value: None,
+        }
+    }
+
+    fn indeterminate_with_value(reasons: BTreeSet<String>, value: Vec<AggregatedFamily>) -> Self {
+        Self::Indeterminate {
+            reasons,
+            value: Some(value),
+        }
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AggregationResult {
     pub schema: String,
     pub plan: String,
     pub plan_digest: String,
     pub trace_root: String,
-    pub families: AggregationValue<Vec<AggregatedFamily>>,
+    pub families: AggregationFamilyKnowledge,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -592,7 +651,9 @@ pub struct CompiledAggregationArtifact {
     pub semantics_version: String,
     pub plan_digest: String,
     pub constitution_digest: String,
+    pub source_artifact_digest: String,
     pub plan: AggregationPlan,
+    pub source_artifact: crate::compile::CompiledProgramArtifact,
     pub phase_two_artifact: crate::compile::CompiledProgramArtifact,
 }
 
@@ -632,8 +693,9 @@ impl UnitDerivationDocumentRegistry {
     pub fn register_aggregation_source(
         &mut self,
         source: &str,
+        source_artifact: &crate::compile::CompiledProgramArtifact,
     ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
-        let artifact = compile_aggregation_plan(source)?;
+        let artifact = compile_aggregation_plan(source, source_artifact)?;
         self.register_aggregation_artifact(artifact)
     }
 
@@ -684,32 +746,38 @@ impl UnitDerivationDocumentRegistry {
 
 pub(crate) fn compile_aggregation_plan(
     source: &str,
+    source_artifact: &crate::compile::CompiledProgramArtifact,
 ) -> Result<CompiledAggregationArtifact, UnitDerivationError> {
     let plan: AggregationPlan = serde_yaml::from_str(source).map_err(|error| {
         UnitDerivationError::InvalidPlan(format!("invalid aggregation plan YAML: {error}"))
     })?;
-    compile_aggregation_plan_value(plan)
+    compile_aggregation_plan_value(plan, source_artifact)
 }
 
 fn compile_aggregation_plan_value(
     plan: AggregationPlan,
+    source_artifact: &crate::compile::CompiledProgramArtifact,
 ) -> Result<CompiledAggregationArtifact, UnitDerivationError> {
-    validate_aggregation_plan(&plan)?;
+    let source_artifact = validate_source_artifact(source_artifact.clone())?;
+    validate_aggregation_plan(&plan, &source_artifact)?;
+    let source_artifact_digest = source_artifact_digest(&source_artifact)?;
     let phase_two_artifact = compile_phase_two_artifact(&plan)?;
-    let plan_digest = digest_text(&canonical_plan_bytes(&plan)?);
+    let plan_digest = aggregation_plan_digest(&plan, &source_artifact_digest)?;
     let constitution_digest = digest_text(&canonical_constitution_bytes(&plan)?);
     Ok(CompiledAggregationArtifact {
         format: COMPILED_AGGREGATION_ARTIFACT_FORMAT.to_string(),
         semantics_version: super::EXPERIMENTAL_SEMANTICS_VERSION.to_string(),
         plan_digest,
         constitution_digest,
+        source_artifact_digest,
         plan,
+        source_artifact,
         phase_two_artifact,
     })
 }
 
 fn validate_compiled_artifact(
-    artifact: CompiledAggregationArtifact,
+    mut artifact: CompiledAggregationArtifact,
 ) -> Result<CompiledAggregationArtifact, UnitDerivationError> {
     if artifact.format != COMPILED_AGGREGATION_ARTIFACT_FORMAT {
         return Err(UnitDerivationError::InvalidAggregationArtifact(format!(
@@ -723,7 +791,16 @@ fn validate_compiled_artifact(
             artifact.semantics_version
         )));
     }
-    let expected = compile_aggregation_plan_value(artifact.plan.clone())?;
+    artifact.source_artifact = validate_source_artifact(artifact.source_artifact)?;
+    let actual_source_digest = source_artifact_digest(&artifact.source_artifact)?;
+    if artifact.source_artifact_digest != actual_source_digest {
+        return Err(UnitDerivationError::InvalidAggregationArtifact(
+            "advertised source artifact digest does not match the embedded source artifact"
+                .to_string(),
+        ));
+    }
+    let expected =
+        compile_aggregation_plan_value(artifact.plan.clone(), &artifact.source_artifact)?;
     if artifact.plan_digest != expected.plan_digest {
         return Err(UnitDerivationError::InvalidAggregationArtifact(
             "advertised plan digest does not match the embedded plan".to_string(),
@@ -732,6 +809,11 @@ fn validate_compiled_artifact(
     if artifact.constitution_digest != expected.constitution_digest {
         return Err(UnitDerivationError::InvalidAggregationArtifact(
             "advertised constitution digest does not match the embedded plan".to_string(),
+        ));
+    }
+    if artifact.source_artifact_digest != expected.source_artifact_digest {
+        return Err(UnitDerivationError::InvalidAggregationArtifact(
+            "embedded source artifact does not match the registered plan binding".to_string(),
         ));
     }
     let actual_phase = serde_json::to_value(&artifact.phase_two_artifact).map_err(|error| {
@@ -762,6 +844,32 @@ fn validate_compiled_artifact(
         ))
     })?;
     Ok(artifact)
+}
+
+fn validate_source_artifact(
+    artifact: crate::compile::CompiledProgramArtifact,
+) -> Result<crate::compile::CompiledProgramArtifact, UnitDerivationError> {
+    let source = serde_json::to_string(&artifact).map_err(|error| {
+        UnitDerivationError::InvalidAggregationArtifact(format!(
+            "could not serialize embedded source artifact: {error}"
+        ))
+    })?;
+    crate::compile::CompiledProgramArtifact::from_json_str(&source).map_err(|error| {
+        UnitDerivationError::InvalidAggregationArtifact(format!(
+            "production source artifact validation failed: {error}"
+        ))
+    })
+}
+
+fn source_artifact_digest(
+    artifact: &crate::compile::CompiledProgramArtifact,
+) -> Result<String, UnitDerivationError> {
+    let bytes = serde_json::to_vec(artifact).map_err(|error| {
+        UnitDerivationError::InvalidAggregationArtifact(format!(
+            "could not canonically encode embedded source artifact: {error}"
+        ))
+    })?;
+    Ok(digest_text(&bytes))
 }
 
 fn compile_phase_two_artifact(
@@ -811,7 +919,10 @@ fn compile_phase_two_artifact(
     })
 }
 
-fn validate_aggregation_plan(plan: &AggregationPlan) -> Result<(), UnitDerivationError> {
+fn validate_aggregation_plan(
+    plan: &AggregationPlan,
+    source_artifact: &crate::compile::CompiledProgramArtifact,
+) -> Result<(), UnitDerivationError> {
     if plan.schema != super::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA {
         return Err(UnitDerivationError::InvalidPlan(format!(
             "aggregation plan schema `{}` is unsupported",
@@ -857,11 +968,11 @@ fn validate_aggregation_plan(plan: &AggregationPlan) -> Result<(), UnitDerivatio
     validate_citation(&plan.adult_selection.citation, "adult selection")?;
     validate_citation(&plan.age_18_conditions.citation, "age-18 conditions")?;
     validate_citation(&plan.care.citation, "care semantics")?;
-    if plan.partner_presence.entitlement_holder_input.is_empty()
+    if plan.partner_presence.reference_person_input.is_empty()
         || plan.partner_presence.caller_determination.is_empty()
     {
         return Err(UnitDerivationError::InvalidPlan(
-            "partner presence requires an explicit entitlement-holder input and caller-determination statement"
+            "partner presence requires an explicit family-unit reference-person input and caller-determination statement"
                 .to_string(),
         ));
     }
@@ -916,6 +1027,28 @@ fn validate_aggregation_plan(plan: &AggregationPlan) -> Result<(), UnitDerivatio
                 "typed reduction input `{}` needs a non-empty reduction_key",
                 input.name
             )));
+        }
+        match (&input.kind, &input.engine_computation) {
+            (AggregationInputKind::ChildGrossAmount, Some(binding)) => {
+                validate_engine_computation_binding(input, binding, source_artifact)?;
+            }
+            (AggregationInputKind::ChildGrossAmount, None) => {
+                return Err(UnitDerivationError::InvalidAggregationOperand {
+                    operation: input.name.clone(),
+                    input: input.name.clone(),
+                    expected: "engine-computed gross binding".to_string(),
+                    found: "plan-authored ChildGrossAmount without upstream binding".to_string(),
+                });
+            }
+            (_, Some(_)) => {
+                return Err(UnitDerivationError::InvalidAggregationOperand {
+                    operation: input.name.clone(),
+                    input: input.name.clone(),
+                    expected: "engine computation only on ChildGrossAmount".to_string(),
+                    found: format!("{:?}/{:?}", input.scope, input.kind),
+                });
+            }
+            (_, None) => {}
         }
     }
 
@@ -1284,6 +1417,51 @@ fn validate_aggregation_plan(plan: &AggregationPlan) -> Result<(), UnitDerivatio
     Ok(())
 }
 
+fn validate_engine_computation_binding(
+    input: &AggregationInput,
+    binding: &EngineComputationBinding,
+    source_artifact: &crate::compile::CompiledProgramArtifact,
+) -> Result<(), UnitDerivationError> {
+    if binding.rule_id.is_empty() {
+        return Err(UnitDerivationError::InvalidAggregationOperand {
+            operation: input.name.clone(),
+            input: input.name.clone(),
+            expected: "non-empty public upstream rule id at gross stage".to_string(),
+            found: "empty engine-computation rule id".to_string(),
+        });
+    }
+    let Some(rule) = source_artifact
+        .program
+        .derived
+        .iter()
+        .find(|rule| rule.id.as_deref() == Some(binding.rule_id.as_str()))
+    else {
+        return Err(UnitDerivationError::UnknownReference {
+            from: format!("engine computation for `{}`", input.name),
+            reference: binding.rule_id.clone(),
+        });
+    };
+    if input.scope != AggregationInputScope::Child
+        || rule.entity != "Child"
+        || !matches!(
+            rule.semantics,
+            crate::spec::DerivedSemanticsSpec::Scalar { .. }
+        )
+        || !matches!(
+            rule.dtype,
+            crate::spec::DTypeSpec::Decimal | crate::spec::DTypeSpec::Integer
+        )
+    {
+        return Err(UnitDerivationError::InvalidAggregationOperand {
+            operation: input.name.clone(),
+            input: binding.rule_id.clone(),
+            expected: "Child-scoped numeric upstream rule for engine-computed gross".to_string(),
+            found: format!("{:?}/{}/{:?}", input.scope, rule.entity, rule.dtype),
+        });
+    }
+    Ok(())
+}
+
 fn validate_input_ref(
     inputs: &BTreeMap<String, &AggregationInput>,
     name: &str,
@@ -1407,6 +1585,16 @@ fn canonical_plan_bytes(plan: &AggregationPlan) -> Result<Vec<u8>, UnitDerivatio
     Ok(bytes)
 }
 
+fn aggregation_plan_digest(
+    plan: &AggregationPlan,
+    source_artifact_digest: &str,
+) -> Result<String, UnitDerivationError> {
+    let mut preimage = b"axiom.unit-aggregation.bound-plan.stage3\0".to_vec();
+    push_len_prefixed(&mut preimage, &canonical_plan_bytes(plan)?);
+    push_len_prefixed(&mut preimage, source_artifact_digest.as_bytes());
+    Ok(digest_text(&preimage))
+}
+
 fn canonical_constitution_bytes(plan: &AggregationPlan) -> Result<Vec<u8>, UnitDerivationError> {
     let normalized = normalized_plan(plan);
     let value = serde_json::json!({
@@ -1495,7 +1683,7 @@ pub(crate) fn execute_aggregation_plan(
         })
         .collect::<BTreeSet<_>>();
     if !relation_reasons.is_empty() {
-        let families = AggregationValue::indeterminate(relation_reasons);
+        let families = AggregationFamilyKnowledge::indeterminate(relation_reasons);
         let trace_root = aggregation_trace_root(&artifact, request, "", &families)?;
         return Ok(AggregationResult {
             schema: super::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA.to_string(),
@@ -1508,7 +1696,7 @@ pub(crate) fn execute_aggregation_plan(
 
     if request.segment_completeness.is_none() {
         let reasons = BTreeSet::from([format!("segment-completeness:{}", request.segment)]);
-        let families = AggregationValue::indeterminate(reasons);
+        let families = AggregationFamilyKnowledge::indeterminate(reasons);
         let trace_root = aggregation_trace_root(&artifact, request, "", &families)?;
         return Ok(AggregationResult {
             schema: super::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA.to_string(),
@@ -1536,7 +1724,7 @@ pub(crate) fn execute_aggregation_plan(
             .iter()
             .flat_map(|item| item.unresolved_facts.iter().cloned())
             .collect::<BTreeSet<_>>();
-        let families = AggregationValue::indeterminate(if reasons.is_empty() {
+        let families = AggregationFamilyKnowledge::indeterminate(if reasons.is_empty() {
             BTreeSet::from(["indeterminate-family-membership".to_string()])
         } else {
             reasons
@@ -1562,8 +1750,13 @@ pub(crate) fn execute_aggregation_plan(
             ))
         })?;
     let interval = parse_segment_interval(&request.segment)?;
-    let (base, input_knowledge) =
-        bind_aggregation_dataset(plan, request, &people, &run.derivation.units, &interval)?;
+    let (base, input_knowledge, provenance) = bind_aggregation_dataset(
+        &artifact,
+        request,
+        &people,
+        &run.derivation.units,
+        &interval,
+    )?;
     let phase_two = super::materialize_phase_two_dataset_with_knowledge(
         &base,
         input_knowledge,
@@ -1598,10 +1791,28 @@ pub(crate) fn execute_aggregation_plan(
         .derivation
         .units
         .iter()
-        .map(|unit| aggregate_family(plan, &phase_two, &period, &role_index, unit))
+        .map(|unit| {
+            aggregate_family(
+                plan,
+                &phase_two,
+                &period,
+                &role_index,
+                &provenance,
+                &artifact.source_artifact_digest,
+                unit,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     families.sort_by(|left, right| left.id.cmp(&right.id));
-    let families = AggregationValue::determined(families);
+    let reasons = families
+        .iter()
+        .flat_map(aggregated_family_reasons)
+        .collect::<BTreeSet<_>>();
+    let families = if reasons.is_empty() {
+        AggregationFamilyKnowledge::determined(families)
+    } else {
+        AggregationFamilyKnowledge::indeterminate_with_value(reasons, families)
+    };
     let trace_root =
         aggregation_trace_root(&artifact, request, &run.derivation.trace.root, &families)?;
     Ok(AggregationResult {
@@ -1651,6 +1862,26 @@ fn validate_request<'a>(
                     from: format!("aggregation person `{}`", person.id),
                     reference: name.clone(),
                 });
+            }
+        }
+        for name in person.engine_computations.keys() {
+            let input = declared_inputs.get(name.as_str()).ok_or_else(|| {
+                UnitDerivationError::UnknownReference {
+                    from: format!("aggregation person `{}` engine computation", person.id),
+                    reference: name.clone(),
+                }
+            })?;
+            if person.role != AggregationPersonRole::Child
+                || input.scope != AggregationInputScope::Child
+                || input.kind != AggregationInputKind::ChildGrossAmount
+                || input.engine_computation.is_none()
+            {
+                return invalid_operand(
+                    &format!("person `{}` engine computation", person.id),
+                    name,
+                    "bound ChildGrossAmount on an explicit child role",
+                    input,
+                );
             }
         }
         for name in person.facts.keys() {
@@ -1733,33 +1964,32 @@ fn validate_request<'a>(
         if family.named_people.len() != 1
             || !family
                 .named_people
-                .contains_key(&plan.partner_presence.entitlement_holder_input)
+                .contains_key(&plan.partner_presence.reference_person_input)
         {
             return Err(UnitDerivationError::InvalidPlan(format!(
                 "family input `{}` must bind exactly the plan input `{}`",
-                family.anchor_person, plan.partner_presence.entitlement_holder_input
+                family.anchor_person, plan.partner_presence.reference_person_input
             )));
         }
-        let holder_knowledge =
-            &family.named_people[&plan.partner_presence.entitlement_holder_input];
+        let holder_knowledge = &family.named_people[&plan.partner_presence.reference_person_input];
         validate_knowledge_evidence(
             holder_knowledge,
-            &format!("family `{}` entitlement holder", family.anchor_person),
+            &format!("family `{}` reference person", family.anchor_person),
         )?;
         if let Ok(holder) = resolve_knowledge(
             Some(holder_knowledge),
-            &format!("family:{}:entitlement-holder", family.anchor_person),
+            &format!("family:{}:reference-person", family.anchor_person),
         ) {
             let Some(person) = people.get(&holder) else {
                 return Err(UnitDerivationError::InvalidPlan(format!(
-                    "entitlement holder `{holder}` is outside the roster"
+                    "family-unit reference person `{holder}` is outside the roster"
                 )));
             };
             if person.role != AggregationPersonRole::Adult {
                 return Err(UnitDerivationError::InvalidRelationshipRole {
                     relation: plan.partner_relation.clone(),
                     person: holder,
-                    role: "entitlement_holder_must_be_adult".to_string(),
+                    role: "reference_person_must_be_adult".to_string(),
                 });
             }
         }
@@ -2045,15 +2275,54 @@ fn parse_segment_interval(segment: &str) -> Result<crate::model::Interval, UnitD
     Ok(crate::model::Interval { start, end })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OperandProvenance {
+    RequestSupplied,
+    EngineComputed {
+        source_artifact_digest: String,
+        rule_id: String,
+        stage: EngineComputationStage,
+    },
+}
+
+impl OperandProvenance {
+    fn label(&self) -> String {
+        match self {
+            Self::RequestSupplied => "request_supplied".to_string(),
+            Self::EngineComputed {
+                source_artifact_digest,
+                rule_id,
+                stage,
+            } => format!(
+                "engine_computed(source_artifact={source_artifact_digest},rule_id={rule_id},stage={})",
+                match stage {
+                    EngineComputationStage::Gross => "gross",
+                }
+            ),
+        }
+    }
+}
+
+type OperandProvenanceIndex = BTreeMap<(String, String), OperandProvenance>;
+
 fn bind_aggregation_dataset(
-    plan: &AggregationPlan,
+    artifact: &CompiledAggregationArtifact,
     request: &AggregationRequest,
     people: &BTreeMap<String, &AggregationPerson>,
     units: &[DerivedUnit],
     interval: &crate::model::Interval,
-) -> Result<(crate::model::DataSet, Vec<InputKnowledgeRecord>), UnitDerivationError> {
+) -> Result<
+    (
+        crate::model::DataSet,
+        Vec<InputKnowledgeRecord>,
+        OperandProvenanceIndex,
+    ),
+    UnitDerivationError,
+> {
+    let plan = &artifact.plan;
     let mut dataset = crate::model::DataSet::default();
     let mut unresolved = Vec::new();
+    let mut provenance = OperandProvenanceIndex::new();
 
     for person in people.values() {
         dataset.add_input(
@@ -2079,6 +2348,10 @@ fn bind_aggregation_dataset(
             );
         }
         for (name, value) in &person.scalars {
+            provenance.insert(
+                (name.clone(), person.id.clone()),
+                OperandProvenance::RequestSupplied,
+            );
             bind_known_input(
                 &mut dataset,
                 &mut unresolved,
@@ -2088,6 +2361,42 @@ fn bind_aggregation_dataset(
                 interval,
                 value,
                 crate::model::ScalarValue::Text,
+            );
+        }
+        for (name, recipe) in &person.engine_computations {
+            // An asserted scalar never gains computed provenance merely because
+            // the same request also supplies a computation recipe. The sole
+            // family-reduction guard below will reject that request value.
+            if person.scalars.contains_key(name) {
+                continue;
+            }
+            let input = plan
+                .inputs
+                .iter()
+                .find(|input| input.name == *name)
+                .expect("request engine-computation names were validated");
+            let binding = input
+                .engine_computation
+                .as_ref()
+                .expect("request engine computations require plan bindings");
+            let value =
+                execute_engine_computation(artifact, input, binding, &person.id, recipe, interval)?;
+            dataset.add_input(
+                name,
+                "Person",
+                person.id.clone(),
+                interval.clone(),
+                crate::model::ScalarValue::Text(value),
+            );
+            provenance.insert(
+                (name.clone(), person.id.clone()),
+                OperandProvenance::EngineComputed {
+                    source_artifact_digest: artifact.source_artifact_digest.clone(),
+                    rule_id: binding.rule_id.clone(),
+                    // The stage is assigned by this materialization path, not
+                    // deserialized from either the plan or the request.
+                    stage: EngineComputationStage::Gross,
+                },
             );
         }
         for (name, value) in &person.facts {
@@ -2144,14 +2453,14 @@ fn bind_aggregation_dataset(
         if let Ok(holder) = resolve_knowledge(
             family
                 .named_people
-                .get(&plan.partner_presence.entitlement_holder_input),
-            &format!("family:{}:entitlement-holder", family.anchor_person),
+                .get(&plan.partner_presence.reference_person_input),
+            &format!("family:{}:reference-person", family.anchor_person),
         ) && !unit.members.contains(&holder)
         {
             return Err(UnitDerivationError::InvalidRelationshipRole {
                 relation: plan.partner_relation.clone(),
                 person: holder,
-                role: "entitlement_holder_must_belong_to_anchored_family".to_string(),
+                role: "reference_person_must_belong_to_anchored_family".to_string(),
             });
         }
         for (name, value) in &family.named_people {
@@ -2180,7 +2489,64 @@ fn bind_aggregation_dataset(
         }
     }
 
-    Ok((dataset, unresolved))
+    Ok((dataset, unresolved, provenance))
+}
+
+fn execute_engine_computation(
+    artifact: &CompiledAggregationArtifact,
+    input: &AggregationInput,
+    binding: &EngineComputationBinding,
+    person_id: &str,
+    recipe: &EngineComputationRequest,
+    interval: &crate::model::Interval,
+) -> Result<String, UnitDerivationError> {
+    let request = crate::api::CompiledExecutionRequest {
+        mode: crate::api::ExecutionMode::Explain,
+        dataset: recipe.dataset.clone(),
+        queries: vec![crate::api::ExecutionQuery {
+            entity_id: person_id.to_string(),
+            period: crate::spec::PeriodSpec {
+                kind: crate::spec::PeriodKindSpec::TaxYear,
+                start: interval.start,
+                end: interval.end,
+            },
+            outputs: vec![binding.rule_id.clone()],
+            assessment_date: None,
+        }],
+    };
+    let response = crate::api::execute_compiled_request(artifact.source_artifact.clone(), request)
+        .map_err(|error| {
+            UnitDerivationError::InvalidPlan(format!(
+                "engine computation `{}` for child `{person_id}` failed: {error}",
+                binding.rule_id
+            ))
+        })?;
+    let output = response
+        .results
+        .first()
+        .and_then(|result| result.outputs.get(&binding.rule_id))
+        .ok_or_else(|| {
+            UnitDerivationError::InvalidPlan(format!(
+                "engine computation `{}` for child `{person_id}` returned no bound output",
+                binding.rule_id
+            ))
+        })?;
+    match output {
+        crate::api::OutputValue::Scalar {
+            value: crate::spec::ScalarValueSpec::Decimal { value },
+            ..
+        } => Ok(value.clone()),
+        crate::api::OutputValue::Scalar {
+            value: crate::spec::ScalarValueSpec::Integer { value },
+            ..
+        } => Ok(value.to_string()),
+        _ => Err(UnitDerivationError::InvalidAggregationOperand {
+            operation: input.name.clone(),
+            input: binding.rule_id.clone(),
+            expected: "engine-computed decimal or integer gross amount".to_string(),
+            found: "non-numeric upstream output".to_string(),
+        }),
+    }
 }
 
 fn bind_known_input<T: Clone + Ord>(
@@ -2354,6 +2720,8 @@ fn aggregate_family(
     data: &super::PhaseTwoDataSet,
     period: &crate::model::Period,
     roles: &RelationshipRoleIndex,
+    provenance: &OperandProvenanceIndex,
+    source_artifact_digest: &str,
     unit: &DerivedUnit,
 ) -> Result<AggregatedFamily, UnitDerivationError> {
     let member_set = unit.members.iter().cloned().collect::<BTreeSet<_>>();
@@ -2600,6 +2968,8 @@ fn aggregate_family(
             period,
             &unit.id,
             &family_children,
+            provenance,
+            source_artifact_digest,
             reduction,
             &mut scalars,
         )?;
@@ -2626,7 +2996,7 @@ fn family_partner_present(
     let members = unit.members.iter().collect::<BTreeSet<_>>();
     let holder = bound_text(
         data,
-        &plan.partner_presence.entitlement_holder_input,
+        &plan.partner_presence.reference_person_input,
         &unit.id,
         period,
     );
@@ -2813,6 +3183,30 @@ fn extend_value_reasons<T>(value: Option<&AggregationValue<T>>, reasons: &mut BT
     }
 }
 
+fn aggregated_family_reasons(family: &AggregatedFamily) -> BTreeSet<String> {
+    let mut reasons = BTreeSet::new();
+    extend_value_reasons(Some(&family.partner_present), &mut reasons);
+    for value in family.scalars.values() {
+        extend_value_reasons(Some(value), &mut reasons);
+    }
+    for value in family.counts.values() {
+        extend_value_reasons(Some(value), &mut reasons);
+    }
+    for value in family.predicates.values() {
+        extend_value_reasons(Some(value), &mut reasons);
+    }
+    for child in &family.children {
+        extend_value_reasons(Some(&child.age_years), &mut reasons);
+        for value in child.age_bands.values() {
+            extend_value_reasons(Some(value), &mut reasons);
+        }
+        for value in child.scalars.values() {
+            extend_value_reasons(Some(value), &mut reasons);
+        }
+    }
+    reasons
+}
+
 fn result_value<T>(result: Result<T, BTreeSet<String>>) -> AggregationValue<T> {
     match result {
         Ok(value) => AggregationValue::determined(value),
@@ -2826,15 +3220,40 @@ fn apply_family_reduction(
     period: &crate::model::Period,
     family_id: &str,
     children: &BTreeSet<String>,
+    provenance: &OperandProvenanceIndex,
+    source_artifact_digest: &str,
     reduction: &FamilyReduction,
     scalars: &mut BTreeMap<String, AggregationValue<String>>,
 ) -> Result<(), UnitDerivationError> {
     let child_input = reduction.child_gross_input.as_deref().unwrap();
     let adjustment_input = reduction.family_adjustment_input.as_deref().unwrap();
     let care_input = reduction.care_fraction_input.as_deref().unwrap();
+    let binding = plan
+        .inputs
+        .iter()
+        .find(|input| input.name == child_input)
+        .and_then(|input| input.engine_computation.as_ref())
+        .expect("validated child-gross inputs have an engine computation binding");
+    let expected_provenance = OperandProvenance::EngineComputed {
+        source_artifact_digest: source_artifact_digest.to_string(),
+        rule_id: binding.rule_id.clone(),
+        stage: EngineComputationStage::Gross,
+    };
     let mut gross = ExactDecimal::zero();
     let mut reasons = BTreeSet::new();
     for child_id in children {
+        let observed_provenance = provenance.get(&(child_input.to_string(), child_id.clone()));
+        if observed_provenance != Some(&expected_provenance) {
+            return Err(UnitDerivationError::InvalidChildGrossProvenance {
+                operation: reduction.output.clone(),
+                input: child_input.to_string(),
+                child: child_id.clone(),
+                expected: expected_provenance.label(),
+                found: observed_provenance
+                    .map(OperandProvenance::label)
+                    .unwrap_or_else(|| "missing".to_string()),
+            });
+        }
         let eligible = match countable_child(plan, data, child_id, period) {
             Ok(false) => continue,
             Ok(true) => match child_age(data, child_id, period) {
@@ -2975,11 +3394,12 @@ fn aggregation_trace_root(
     artifact: &CompiledAggregationArtifact,
     request: &AggregationRequest,
     constitution_trace: &str,
-    families: &AggregationValue<Vec<AggregatedFamily>>,
+    families: &AggregationFamilyKnowledge,
 ) -> Result<String, UnitDerivationError> {
     let request = normalized_request(request);
     let mut preimage = b"axiom.unit-aggregation.trace.stage3\0".to_vec();
     push_len_prefixed(&mut preimage, artifact.plan_digest.as_bytes());
+    push_len_prefixed(&mut preimage, artifact.source_artifact_digest.as_bytes());
     push_len_prefixed(&mut preimage, constitution_trace.as_bytes());
     let request_bytes = serde_json::to_vec(&request).map_err(|error| {
         UnitDerivationError::InvalidAggregationArtifact(format!(

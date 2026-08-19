@@ -1353,9 +1353,67 @@ fn nz_known<T>(value: T, id: &str) -> AggregationKnowledge<T> {
     }
 }
 
+const NZ_GROSS_RULE_ID: &str =
+    "nz:statutes/income_tax/family_scheme/tax_credits#best_start_tax_credit_before_abatement";
+
+struct NzGrossModuleSource(String);
+
+impl crate::source::ModuleSource for NzGrossModuleSource {
+    fn load(&self, target: &str) -> Result<Option<String>, crate::source::SourceError> {
+        Ok((target == "nz:statutes/income_tax/family_scheme/tax_credits").then(|| self.0.clone()))
+    }
+}
+
+fn nz_source_artifact() -> crate::compile::CompiledProgramArtifact {
+    compile_nz_source_artifact(include_str!(
+        "../../tests/fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml"
+    ))
+}
+
+fn compile_nz_source_artifact(source: &str) -> crate::compile::CompiledProgramArtifact {
+    crate::compile::CompiledProgramArtifact::from_rulespec_with_source(
+        "nz:statutes/income_tax/family_scheme/tax_credits",
+        &NzGrossModuleSource(source.to_string()),
+    )
+    .unwrap()
+}
+
+fn nz_gross_computation(person_id: &str, gross: &str) -> EngineComputationRequest {
+    let entitlement_days = match gross {
+        "4041" => 365,
+        "0" => 0,
+        other => panic!("unsupported fixture gross `{other}`"),
+    };
+    EngineComputationRequest {
+        dataset: serde_json::from_value(serde_json::json!({
+            "inputs": [
+                {
+                    "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_entitlement_days",
+                    "entity": "Child",
+                    "entity_id": person_id,
+                    "interval": {"start": "2026-04-01", "end": "2027-03-31"},
+                    "value": {"kind": "integer", "value": entitlement_days}
+                },
+                {
+                    "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_child_care_fraction",
+                    "entity": "Child",
+                    "entity_id": person_id,
+                    "interval": {"start": "2026-04-01", "end": "2027-03-31"},
+                    "value": {"kind": "decimal", "value": "1"}
+                }
+            ]
+        }))
+        .unwrap(),
+    }
+}
+
 fn nz_person(id: &str, age_years: i64, values: &[(&str, &str)], child: bool) -> AggregationPerson {
+    let gross = values.iter().find_map(|(name, value)| {
+        (*name == "best_start_before_care_and_abatement").then_some(*value)
+    });
     let mut scalars = values
         .iter()
+        .filter(|(name, _)| *name != "best_start_before_care_and_abatement")
         .map(|(name, value)| {
             (
                 (*name).to_string(),
@@ -1404,6 +1462,14 @@ fn nz_person(id: &str, age_years: i64, values: &[(&str, &str)], child: bool) -> 
         } else {
             BTreeMap::new()
         },
+        engine_computations: gross
+            .map(|gross| {
+                BTreeMap::from([(
+                    "best_start_before_care_and_abatement".to_string(),
+                    nz_gross_computation(id, gross),
+                )])
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -1521,8 +1587,8 @@ fn nz_request() -> AggregationRequest {
             anchor_person: "primary".to_string(),
             evidence: nz_evidence("family-input:primary"),
             named_people: BTreeMap::from([(
-                "mc7_entitlement_holder".to_string(),
-                nz_known("primary".to_string(), "mc7:primary"),
+                "family_unit_reference_person".to_string(),
+                nz_known("primary".to_string(), "family-reference:primary"),
             )]),
             scalars: BTreeMap::from([
                 (
@@ -1555,13 +1621,46 @@ fn determined<T>(value: &AggregationValue<T>) -> &T {
     }
 }
 
+fn indeterminate_reasons<T>(value: &AggregationValue<T>) -> &BTreeSet<String> {
+    match value {
+        AggregationValue::Indeterminate { reasons } => reasons,
+        AggregationValue::Determined { .. } => panic!("expected Indeterminate value"),
+    }
+}
+
+fn determined_families(value: &AggregationFamilyKnowledge) -> &[AggregatedFamily] {
+    match value {
+        AggregationFamilyKnowledge::Determined { value } => value,
+        AggregationFamilyKnowledge::Indeterminate { reasons, .. } => {
+            panic!("expected Determined families, found {reasons:?}")
+        }
+    }
+}
+
+fn indeterminate_families(value: &AggregationFamilyKnowledge) -> &[AggregatedFamily] {
+    match value {
+        AggregationFamilyKnowledge::Indeterminate {
+            value: Some(value), ..
+        } => value,
+        AggregationFamilyKnowledge::Indeterminate {
+            reasons,
+            value: None,
+        } => panic!("expected retained family topology, found only {reasons:?}"),
+        AggregationFamilyKnowledge::Determined { .. } => {
+            panic!("expected Indeterminate families")
+        }
+    }
+}
+
 #[test]
 fn nz_family_fixture_uses_registered_artifact_and_asserts_every_output() {
     let mut registry = UnitDerivationDocumentRegistry::default();
+    let source_artifact = nz_source_artifact();
     let artifact = registry
-        .register_aggregation_source(include_str!(
-            "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
-        ))
+        .register_aggregation_source(
+            include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"),
+            &source_artifact,
+        )
         .unwrap();
     let artifact_json = artifact.to_json_pretty().unwrap();
     let mut reloaded = UnitDerivationDocumentRegistry::default();
@@ -1578,7 +1677,7 @@ fn nz_family_fixture_uses_registered_artifact_and_asserts_every_output() {
     assert_eq!(result.plan, "nz:incomeexplorer:family-aggregation-2026-27");
     assert!(result.plan_digest.starts_with("sha256:"));
     assert!(result.trace_root.starts_with("sha256:"));
-    let families = determined(&result.families);
+    let families = determined_families(&result.families);
     assert_eq!(families.len(), 1);
     let family = &families[0];
     assert_eq!(
@@ -1688,8 +1787,14 @@ fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
     let artifact = nz_artifact();
     let plan = &artifact.plan;
     assert_eq!(
-        plan.partner_presence.citation.provision,
-        "Income Tax Act 2007 s MC 7"
+        plan.partner_presence.reference_person_input,
+        "family_unit_reference_person"
+    );
+    assert!(
+        plan.partner_presence
+            .citation
+            .provision
+            .contains("MC 7(1) chapeau")
     );
     assert_eq!(
         plan.partner_presence.citation.authority,
@@ -1706,10 +1811,23 @@ fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
             .contains("Caller-evidenced")
     );
     assert_eq!(plan.age_18_conditions.age, 18);
-    for input in [
-        &plan.age_18_conditions.not_financially_independent_input,
-        &plan.age_18_conditions.attending_school_or_tertiary_input,
-        &plan.age_18_conditions.commissioner_period_input,
+    assert_eq!(
+        plan.age_18_conditions.citation.provision,
+        "Income Tax Act 2007 s MC 9(1)(a)-(b) and (2)-(3)"
+    );
+    for (input, provision) in [
+        (
+            &plan.age_18_conditions.not_financially_independent_input,
+            "Income Tax Act 2007 s MC 9(1)(a)",
+        ),
+        (
+            &plan.age_18_conditions.attending_school_or_tertiary_input,
+            "Income Tax Act 2007 s MC 9(1)(b)",
+        ),
+        (
+            &plan.age_18_conditions.commissioner_period_input,
+            "Income Tax Act 2007 s MC 9(2)-(3)",
+        ),
     ] {
         let declaration = plan
             .inputs
@@ -1720,7 +1838,35 @@ fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
             declaration.citation.authority,
             "nz/statute/act/public/2007/0097/section/MC-9"
         );
+        assert_eq!(declaration.citation.provision, provision);
     }
+    let age_14_18 = plan
+        .child_counts
+        .iter()
+        .find(|count| count.output == "child_count_age_14_18")
+        .unwrap();
+    assert!(
+        age_14_18
+            .citation
+            .provision
+            .contains("para (a) for ages 14-15")
+    );
+    assert!(
+        age_14_18
+            .citation
+            .provision
+            .contains("para (b), including not financially independent, for ages 16-17")
+    );
+    assert!(
+        age_14_18
+            .citation
+            .provision
+            .contains("para (c) with s MC 9(1)(a)-(b), (2)-(3) applies at age 18")
+    );
+    assert_eq!(
+        age_14_18.citation.authority,
+        "nz/statute/act/public/2007/0097/section/YA-1"
+    );
     let best_start_care = plan
         .inputs
         .iter()
@@ -1737,7 +1883,27 @@ fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
         .unwrap();
     assert_eq!(
         iwtc_care.citation.provision,
+        "Income Tax Act 2007 ss MC 10(4) and MD 10(2), (3)(d)"
+    );
+    let iwtc_principal = plan
+        .inputs
+        .iter()
+        .find(|input| input.name == "in_work_tax_credit_principal_caregiver")
+        .unwrap();
+    assert_eq!(
+        iwtc_principal.citation.provision,
         "Income Tax Act 2007 s MC 10(3)"
+    );
+    assert_eq!(
+        plan.child_agreements
+            .iter()
+            .find(|agreement| {
+                agreement.output == "in_work_tax_credit_child_exclusive_care_fraction"
+            })
+            .unwrap()
+            .citation
+            .provision,
+        "Income Tax Act 2007 ss MC 10(4) and MD 10(2), (3)(d)"
     );
     let limitation_ids = plan
         .limitations
@@ -1745,7 +1911,7 @@ fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
         .map(|limitation| limitation.id.as_str())
         .collect::<BTreeSet<_>>();
     for required in [
-        "mc7-entitlement-selection",
+        "mc7-applicability-and-selection-out-of-scope",
         "mc9-commissioner-period",
         "mg2-care-fact",
         "relationship-and-role-classification",
@@ -1755,6 +1921,39 @@ fn nz_tier_b_legal_choices_are_explicit_cited_inputs_and_limitations() {
     ] {
         assert!(limitation_ids.contains(required));
     }
+    let mc7_limitation = plan
+        .limitations
+        .iter()
+        .find(|limitation| limitation.id == "mc7-applicability-and-selection-out-of-scope")
+        .unwrap();
+    assert!(mc7_limitation.statement.contains("MC 7(1) applicability"));
+    assert!(
+        mc7_limitation
+            .statement
+            .contains("MC 7(2) allocation or Commissioner selection")
+    );
+    assert_eq!(
+        mc7_limitation.citation.provision,
+        "Income Tax Act 2007 s MC 7(1)-(2)"
+    );
+    assert_eq!(
+        plan.limitations
+            .iter()
+            .find(|limitation| limitation.id == "mc9-commissioner-period")
+            .unwrap()
+            .citation
+            .provision,
+        "Income Tax Act 2007 s MC 9(2)-(3)"
+    );
+    assert_eq!(
+        plan.limitations
+            .iter()
+            .find(|limitation| limitation.id == "mc10-iwtc-care")
+            .unwrap()
+            .citation
+            .provision,
+        "Income Tax Act 2007 ss MC 10(3)-(4) and MD 10(2), (3)(d)"
+    );
 }
 
 #[test]
@@ -1764,7 +1963,7 @@ fn reviewer_best_start_plan_is_rejected_by_named_family_scope_guard() {
         include_str!("../../tests/fixtures/unit_derivation/per_child_request.json")
             .contains("\"two_child_abatement\": \"2000\"")
     );
-    let error = compile_aggregation_plan(source)
+    let error = compile_aggregation_plan(source, &nz_source_artifact())
         .expect_err("the exact accepted reviewer plan must now fail semantic validation");
     assert_eq!(
         error,
@@ -1777,10 +1976,76 @@ fn reviewer_best_start_plan_is_rejected_by_named_family_scope_guard() {
 }
 
 #[test]
-fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
-    let artifact = compile_aggregation_plan(include_str!(
-        "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
+fn relabelled_request_scalar_is_rejected_by_named_engine_provenance_guard() {
+    let artifact = compile_aggregation_plan(
+        include_str!("../../tests/fixtures/unit_derivation/renamed_child_gross_plan.yaml"),
+        &nz_source_artifact(),
+    )
+    .unwrap();
+    let request: AggregationRequest = serde_json::from_str(include_str!(
+        "../../tests/fixtures/unit_derivation/renamed_child_gross_request.json"
     ))
+    .unwrap();
+
+    let error = execute_aggregation_plan(&artifact, &request, &enabled())
+        .expect_err("a request scalar cannot acquire engine-computed provenance by relabelling");
+    match error {
+        UnitDerivationError::InvalidChildGrossProvenance {
+            operation,
+            input,
+            child,
+            expected,
+            found,
+        } => {
+            assert_eq!(operation, "best_start_total");
+            assert_eq!(input, "best_start_after_per_child_abatement");
+            assert_eq!(child, "child-0");
+            assert_eq!(found, "request_supplied");
+            assert!(expected.contains(&format!("rule_id={NZ_GROSS_RULE_ID}")));
+            assert!(expected.contains("stage=gross"));
+            assert!(expected.contains(&artifact.source_artifact_digest));
+        }
+        other => panic!("expected InvalidChildGrossProvenance, found {other:?}"),
+    }
+}
+
+#[test]
+fn request_scalar_cannot_launder_through_a_same_name_engine_recipe() {
+    let artifact = nz_artifact();
+    let mut request = nz_request();
+    let child = request
+        .persons
+        .iter_mut()
+        .find(|person| person.id == "child-0")
+        .unwrap();
+    child.scalars.insert(
+        "best_start_before_care_and_abatement".to_string(),
+        nz_known("3041".to_string(), "laundered-request-scalar"),
+    );
+
+    let error = execute_aggregation_plan(&artifact, &request, &enabled())
+        .expect_err("an asserted scalar must retain request-supplied provenance");
+    assert!(matches!(
+        error,
+        UnitDerivationError::InvalidChildGrossProvenance {
+            operation,
+            input,
+            child,
+            found,
+            ..
+        } if operation == "best_start_total"
+            && input == "best_start_before_care_and_abatement"
+            && child == "child-0"
+            && found == "request_supplied"
+    ));
+}
+
+#[test]
+fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
+    let artifact = compile_aggregation_plan(
+        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"),
+        &nz_source_artifact(),
+    )
     .unwrap();
     let mut scalar_unknown = nz_request();
     scalar_unknown.persons[0].scalars.insert(
@@ -1790,7 +2055,7 @@ fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
         },
     );
     let result = execute_aggregation_plan(&artifact, &scalar_unknown, &enabled()).unwrap();
-    let family = &determined(&result.families)[0];
+    let family = &indeterminate_families(&result.families)[0];
     assert!(matches!(
         family.scalars["weekly_wages"],
         AggregationValue::Indeterminate { .. }
@@ -1814,7 +2079,7 @@ fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
     );
     let result = execute_aggregation_plan(&artifact, &scalar_conflict, &enabled()).unwrap();
     assert!(matches!(
-        determined(&result.families)[0].scalars["weekly_wages"],
+        indeterminate_families(&result.families)[0].scalars["weekly_wages"],
         AggregationValue::Indeterminate { .. }
     ));
 
@@ -1823,7 +2088,7 @@ fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
         .scalars
         .remove("family_scheme_income");
     let result = execute_aggregation_plan(&artifact, &missing_family_scalar, &enabled()).unwrap();
-    let family = &determined(&result.families)[0];
+    let family = &indeterminate_families(&result.families)[0];
     assert!(matches!(
         family.scalars["best_start_total_continuous_abatement"],
         AggregationValue::Indeterminate { .. }
@@ -1844,8 +2109,105 @@ fn unknown_scalar_and_missing_relation_completeness_never_become_zero() {
     let result = execute_aggregation_plan(&artifact, &missing_completeness, &enabled()).unwrap();
     assert!(matches!(
         result.families,
-        AggregationValue::Indeterminate { .. }
+        AggregationFamilyKnowledge::Indeterminate { value: None, .. }
     ));
+}
+
+#[test]
+fn mixed_conflict_care_and_unknown_age_indetermines_family_without_losing_topology() {
+    let artifact = nz_artifact();
+    let mut request = nz_request();
+    request
+        .persons
+        .iter_mut()
+        .find(|person| person.id == "child-0")
+        .unwrap()
+        .scalars
+        .insert(
+            "best_start_claimant_care_fraction".to_string(),
+            AggregationKnowledge::Conflict {
+                observations: vec![
+                    AggregationObservation {
+                        value: "1".to_string(),
+                        evidence: nz_evidence("mixed:care:full"),
+                    },
+                    AggregationObservation {
+                        value: "0.5".to_string(),
+                        evidence: nz_evidence("mixed:care:half"),
+                    },
+                ],
+            },
+        );
+    let child_1 = request
+        .persons
+        .iter_mut()
+        .find(|person| person.id == "child-1")
+        .unwrap();
+    child_1.age_years = Some(AggregationKnowledge::Unknown {
+        evidence: nz_evidence("mixed:age:unknown"),
+    });
+
+    let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
+    let care_reasons = BTreeSet::from([
+        "input:child-0:best_start_claimant_care_fraction:conflict:mixed:care:full".to_string(),
+        "input:child-0:best_start_claimant_care_fraction:conflict:mixed:care:half".to_string(),
+    ]);
+    let age_reasons =
+        BTreeSet::from(["input:child-1:age_years:unknown:mixed:age:unknown".to_string()]);
+    let mut all_reasons = care_reasons.clone();
+    all_reasons.extend(age_reasons.iter().cloned());
+    let families = match &result.families {
+        AggregationFamilyKnowledge::Indeterminate {
+            reasons,
+            value: Some(value),
+        } => {
+            assert_eq!(reasons, &all_reasons);
+            value
+        }
+        other => panic!("expected Indeterminate families with retained topology, found {other:?}"),
+    };
+
+    assert_eq!(families.len(), 1);
+    let family = &families[0];
+    assert_eq!(
+        family.members,
+        vec!["child-0", "child-1", "partner", "primary"]
+    );
+    assert_eq!(
+        family
+            .children
+            .iter()
+            .map(|child| child.person.as_str())
+            .collect::<Vec<_>>(),
+        vec!["child-0", "child-1"]
+    );
+    let child_0 = family
+        .children
+        .iter()
+        .find(|child| child.person == "child-0")
+        .unwrap();
+    let child_1 = family
+        .children
+        .iter()
+        .find(|child| child.person == "child-1")
+        .unwrap();
+    assert_eq!(
+        indeterminate_reasons(&child_0.scalars["best_start_claimant_care_fraction"]),
+        &care_reasons
+    );
+    assert_eq!(
+        indeterminate_reasons(&family.scalars["best_start_total"]),
+        &all_reasons
+    );
+    assert_eq!(
+        indeterminate_reasons(&family.counts["dependent_child_count"]),
+        &age_reasons
+    );
+    assert_eq!(
+        indeterminate_reasons(&family.counts["youngest_child_age"]),
+        &age_reasons
+    );
+    assert_eq!(indeterminate_reasons(&child_1.age_years), &age_reasons);
 }
 
 #[test]
@@ -1888,7 +2250,10 @@ fn indeterminate_relation_knowledge_cannot_produce_a_smaller_determined_family()
             .knowledge = knowledge;
         let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
         assert!(
-            matches!(result.families, AggregationValue::Indeterminate { .. }),
+            matches!(
+                result.families,
+                AggregationFamilyKnowledge::Indeterminate { value: None, .. }
+            ),
             "an unresolved child relation must not become a determined smaller count"
         );
     }
@@ -1904,7 +2269,7 @@ fn omitted_relation_is_unknown_but_evidenced_complete_empty_is_known_empty() {
     let result = execute_aggregation_plan(&artifact, &omitted, &enabled()).unwrap();
     assert!(matches!(
         result.families,
-        AggregationValue::Indeterminate { .. }
+        AggregationFamilyKnowledge::Indeterminate { value: None, .. }
     ));
 
     let mut complete_empty = nz_request();
@@ -1916,7 +2281,7 @@ fn omitted_relation_is_unknown_but_evidenced_complete_empty_is_known_empty() {
         .facts
         .clear();
     let result = execute_aggregation_plan(&artifact, &complete_empty, &enabled()).unwrap();
-    let primary = determined(&result.families)
+    let primary = indeterminate_families(&result.families)
         .iter()
         .find(|family| family.members.contains(&"primary".to_string()))
         .unwrap();
@@ -1928,9 +2293,10 @@ fn omitted_relation_is_unknown_but_evidenced_complete_empty_is_known_empty() {
 }
 
 fn nz_artifact() -> CompiledAggregationArtifact {
-    compile_aggregation_plan(include_str!(
-        "../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"
-    ))
+    compile_aggregation_plan(
+        include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"),
+        &nz_source_artifact(),
+    )
     .unwrap()
 }
 
@@ -1968,7 +2334,7 @@ fn child_age_boundaries_and_every_mc9_condition_are_operational() {
     let mut request = nz_request();
     replace_children(&mut request, &[0, 2, 3, 13, 14, 18, 19]);
     let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-    let family = &determined(&result.families)[0];
+    let family = &determined_families(&result.families)[0];
     assert_eq!(*determined(&family.counts["dependent_child_count"]), 6);
     assert_eq!(
         *determined(&family.counts["best_start_eligible_child_count"]),
@@ -2012,7 +2378,7 @@ fn child_age_boundaries_and_every_mc9_condition_are_operational() {
             .facts
             .insert(fact.to_string(), nz_known(false, &format!("false:{fact}")));
         let result = execute_aggregation_plan(&artifact, &false_request, &enabled()).unwrap();
-        let family = &determined(&result.families)[0];
+        let family = &determined_families(&result.families)[0];
         assert_eq!(*determined(&family.counts["dependent_child_count"]), 5);
         assert_eq!(*determined(&family.counts["child_count_age_14_18"]), 1);
     }
@@ -2031,7 +2397,7 @@ fn child_age_boundaries_and_every_mc9_condition_are_operational() {
             },
         );
     let result = execute_aggregation_plan(&artifact, &unknown, &enabled()).unwrap();
-    let family = &determined(&result.families)[0];
+    let family = &indeterminate_families(&result.families)[0];
     assert!(matches!(
         family.counts["dependent_child_count"],
         AggregationValue::Indeterminate { .. }
@@ -2071,7 +2437,7 @@ fn missing_unknown_and_conflicting_child_inputs_never_reduce_to_zero_or_false() 
             .unwrap()
             .age_years = age;
         let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-        let family = &determined(&result.families)[0];
+        let family = &indeterminate_families(&result.families)[0];
         assert!(matches!(
             family.counts["dependent_child_count"],
             AggregationValue::Indeterminate { .. }
@@ -2108,7 +2474,7 @@ fn missing_unknown_and_conflicting_child_inputs_never_reduce_to_zero_or_false() 
             .facts
             .insert("principal_care_for_family_scheme".to_string(), knowledge);
         let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-        let family = &determined(&result.families)[0];
+        let family = &indeterminate_families(&result.families)[0];
         assert!(matches!(
             family.counts["dependent_child_count"],
             AggregationValue::Indeterminate { .. }
@@ -2141,7 +2507,7 @@ fn mg2_care_fraction_and_principal_care_are_not_defaulted() {
             nz_known("0".to_string(), "no-adjustment"),
         );
         let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-        let family = &determined(&result.families)[0];
+        let family = &determined_families(&result.families)[0];
         assert_eq!(
             determined(&family.scalars["best_start_total_before_abatement"]),
             expected_gross
@@ -2161,7 +2527,7 @@ fn mg2_care_fraction_and_principal_care_are_not_defaulted() {
             nz_known(false, "no-principal-care"),
         );
     let result = execute_aggregation_plan(&artifact, &no_principal_care, &enabled()).unwrap();
-    let family = &determined(&result.families)[0];
+    let family = &determined_families(&result.families)[0];
     assert_eq!(*determined(&family.counts["dependent_child_count"]), 0);
     assert_eq!(
         determined(&family.scalars["best_start_total_before_abatement"]),
@@ -2190,7 +2556,7 @@ fn mg2_care_fraction_and_principal_care_are_not_defaulted() {
             .scalars
             .insert("best_start_claimant_care_fraction".to_string(), knowledge);
         let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-        let family = &determined(&result.families)[0];
+        let family = &indeterminate_families(&result.families)[0];
         assert!(matches!(
             family.scalars["best_start_total"],
             AggregationValue::Indeterminate { .. }
@@ -2216,8 +2582,9 @@ fn mg2_care_fraction_and_principal_care_are_not_defaulted() {
         nz_known("0.5".to_string(), "iwtc-care-half"),
     );
     let result = execute_aggregation_plan(&artifact, &inconsistent_iwtc, &enabled()).unwrap();
+    let family = &indeterminate_families(&result.families)[0];
     assert!(matches!(
-        determined(&result.families)[0].scalars["in_work_tax_credit_child_exclusive_care_fraction"],
+        family.scalars["in_work_tax_credit_child_exclusive_care_fraction"],
         AggregationValue::Indeterminate { .. }
     ));
 }
@@ -2284,7 +2651,7 @@ fn direction_partner_anchor_unpartnered_and_actual_shape_predicates_are_checked(
         .tuple = ["partner".to_string(), "primary".to_string()];
     let result = execute_aggregation_plan(&artifact, &reversed_partner, &enabled()).unwrap();
     assert!(*determined(
-        &determined(&result.families)[0].partner_present
+        &determined_families(&result.families)[0].partner_present
     ));
 
     let mut unpartnered = nz_request();
@@ -2298,7 +2665,7 @@ fn direction_partner_anchor_unpartnered_and_actual_shape_predicates_are_checked(
         .clear();
     replace_children(&mut unpartnered, &[14]);
     let result = execute_aggregation_plan(&artifact, &unpartnered, &enabled()).unwrap();
-    let family = &determined(&result.families)[0];
+    let family = &determined_families(&result.families)[0];
     assert!(!*determined(&family.partner_present));
     assert!(*determined(
         &family.predicates["sole_parent_with_dependent_children"]
@@ -2313,20 +2680,20 @@ fn direction_partner_anchor_unpartnered_and_actual_shape_predicates_are_checked(
 
     let mut unknown_holder = nz_request();
     unknown_holder.family_inputs[0].named_people.insert(
-        "mc7_entitlement_holder".to_string(),
+        "family_unit_reference_person".to_string(),
         AggregationKnowledge::Unknown {
-            evidence: nz_evidence("mc7-holder-unknown"),
+            evidence: nz_evidence("family-reference-unknown"),
         },
     );
     let result = execute_aggregation_plan(&artifact, &unknown_holder, &enabled()).unwrap();
     assert!(matches!(
-        determined(&result.families)[0].partner_present,
+        indeterminate_families(&result.families)[0].partner_present,
         AggregationValue::Indeterminate { .. }
     ));
 
     let mut child_holder = nz_request();
     child_holder.family_inputs[0].named_people.insert(
-        "mc7_entitlement_holder".to_string(),
+        "family_unit_reference_person".to_string(),
         nz_known("child-0".to_string(), "invalid-child-holder"),
     );
     assert!(matches!(
@@ -2341,7 +2708,7 @@ fn unrelated_family_preserves_family_id_but_changes_bound_trace() {
     let artifact = nz_artifact();
     let base_request = nz_request();
     let base = execute_aggregation_plan(&artifact, &base_request, &enabled()).unwrap();
-    let base_family = &determined(&base.families)[0];
+    let base_family = &determined_families(&base.families)[0];
     let base_id = base_family.id.clone();
 
     let mut expanded = base_request.clone();
@@ -2374,8 +2741,8 @@ fn unrelated_family_preserves_family_id_but_changes_bound_trace() {
         anchor_person: "other-adult".to_string(),
         evidence: nz_evidence("family-input:other-adult"),
         named_people: BTreeMap::from([(
-            "mc7_entitlement_holder".to_string(),
-            nz_known("other-adult".to_string(), "mc7:other-adult"),
+            "family_unit_reference_person".to_string(),
+            nz_known("other-adult".to_string(), "family-reference:other-adult"),
         )]),
         scalars: BTreeMap::from([
             (
@@ -2397,7 +2764,7 @@ fn unrelated_family_preserves_family_id_but_changes_bound_trace() {
         ]),
     });
     let expanded_result = execute_aggregation_plan(&artifact, &expanded, &enabled()).unwrap();
-    let families = determined(&expanded_result.families);
+    let families = determined_families(&expanded_result.families);
     assert_eq!(families.len(), 2);
     let unchanged = families
         .iter()
@@ -2517,10 +2884,8 @@ fn conflicting_family_adjustment_is_indeterminate_and_order_invariant() {
         },
     );
     let agreeing_result = execute_aggregation_plan(&artifact, &agreeing, &enabled()).unwrap();
-    assert_eq!(
-        determined(&determined(&agreeing_result.families)[0].scalars["best_start_total"]),
-        "7082"
-    );
+    let family = &determined_families(&agreeing_result.families)[0];
+    assert_eq!(determined(&family.scalars["best_start_total"]), "7082");
 
     let mut disagreeing = agreeing;
     if let AggregationKnowledge::Observations { observations } = disagreeing.family_inputs[0]
@@ -2532,7 +2897,7 @@ fn conflicting_family_adjustment_is_indeterminate_and_order_invariant() {
     }
     let disagreeing_result = execute_aggregation_plan(&artifact, &disagreeing, &enabled()).unwrap();
     assert!(matches!(
-        determined(&disagreeing_result.families)[0].scalars["best_start_total"],
+        indeterminate_families(&disagreeing_result.families)[0].scalars["best_start_total"],
         AggregationValue::Indeterminate { .. }
     ));
 
@@ -2553,7 +2918,7 @@ fn conflicting_family_adjustment_is_indeterminate_and_order_invariant() {
         },
     );
     let first = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-    let family = &determined(&first.families)[0];
+    let family = &indeterminate_families(&first.families)[0];
     assert!(matches!(
         family.scalars["best_start_total"],
         AggregationValue::Indeterminate { .. }
@@ -2575,7 +2940,7 @@ fn decimal_context_uses_half_even_at_both_midpoint_parities() {
     let source =
         include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml")
             .replace("decimal_precision: 40", "decimal_precision: 2");
-    let artifact = compile_aggregation_plan(&source).unwrap();
+    let artifact = compile_aggregation_plan(&source, &nz_source_artifact()).unwrap();
     for (input, expected) in [("1.25", "1.2"), ("1.35", "1.4")] {
         let mut request = nz_request();
         request.persons.retain(|person| person.id == "primary");
@@ -2592,7 +2957,7 @@ fn decimal_context_uses_half_even_at_both_midpoint_parities() {
             nz_known("0".to_string(), "zero-adjustment"),
         );
         let result = execute_aggregation_plan(&artifact, &request, &enabled()).unwrap();
-        let family = &determined(&result.families)[0];
+        let family = &determined_families(&result.families)[0];
         assert_eq!(determined(&family.scalars["weekly_wages"]), expected);
     }
 }
@@ -2616,12 +2981,30 @@ fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected()
 
     let source =
         include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml");
-    let citation_edit = compile_aggregation_plan(&source.replace(
-        "Income Tax Act 2007 s LC 13",
-        "Income Tax Act 2007 s LC 13 (citation mutation)",
-    ))
+    let citation_edit = compile_aggregation_plan(
+        &source.replace(
+            "Income Tax Act 2007 s LC 13",
+            "Income Tax Act 2007 s LC 13 (citation mutation)",
+        ),
+        &nz_source_artifact(),
+    )
     .unwrap();
     assert_ne!(artifact.plan_digest, citation_edit.plan_digest);
+
+    let source_edit = compile_aggregation_plan(
+        source,
+        &compile_nz_source_artifact(
+            include_str!("../../tests/fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml")
+                .replace("formula: '4041'", "formula: '9999'")
+                .as_str(),
+        ),
+    )
+    .unwrap();
+    assert_ne!(
+        artifact.source_artifact_digest,
+        source_edit.source_artifact_digest
+    );
+    assert_ne!(artifact.plan_digest, source_edit.plan_digest);
 
     for (pointer, replacement) in [
         ("/format", serde_json::json!("wrong-format")),
@@ -2634,6 +3017,16 @@ fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected()
         ),
         (
             "/phase_two_artifact/engine_version",
+            serde_json::json!("tampered-engine"),
+        ),
+        (
+            "/source_artifact_digest",
+            serde_json::json!(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+        ),
+        (
+            "/source_artifact/engine_version",
             serde_json::json!("tampered-engine"),
         ),
     ] {
@@ -2744,7 +3137,7 @@ fn every_stage3_structural_guard_kills_its_isolated_plan_mutant() {
     for (name, mutant) in mutants {
         assert_ne!(mutant, source, "mutant `{name}` must change the fixture");
         assert!(
-            compile_aggregation_plan(&mutant).is_err(),
+            compile_aggregation_plan(&mutant, &nz_source_artifact()).is_err(),
             "plan validator accepted `{name}` mutant"
         );
     }

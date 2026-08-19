@@ -64,7 +64,7 @@ inputs:
     scope: adult
     kind: additive_amount
     citation: *lc13
-  - name: best_start_before_care_and_abatement
+  - name: best_start_after_per_child_abatement
     scope: child
     kind: child_gross_amount
     reduction_key: best_start
@@ -273,7 +273,7 @@ family_reductions:
     gross_output: best_start_total_before_abatement
     operation: sum_children_then_subtract_family_once
     reduction_key: best_start
-    child_gross_input: best_start_before_care_and_abatement
+    child_gross_input: best_start_after_per_child_abatement
     family_adjustment_input: best_start_family_abatement
     care_fraction_input: best_start_claimant_care_fraction
     minimum_age: 0

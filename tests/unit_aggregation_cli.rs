@@ -39,8 +39,36 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
         fs::remove_dir_all(&temp).expect("remove stale test-owned directory");
     }
     fs::create_dir_all(&temp).expect("create test-owned directory");
+    let temp = fs::canonicalize(&temp).expect("resolve the exact test-owned directory");
     let first_artifact = temp.join("first.json");
     let second_artifact = temp.join("second.json");
+    let rulespec_root = temp.join("rulespec-nz");
+    let source_program =
+        rulespec_root.join("nz/statutes/income_tax/family_scheme/tax_credits.yaml");
+    fs::create_dir_all(source_program.parent().unwrap()).expect("create canonical source tree");
+    fs::copy(
+        fixture("nz_best_start_gross.rulespec.yaml"),
+        &source_program,
+    )
+    .expect("copy source fixture into canonical tree");
+    let source_artifact = temp.join("source.json");
+    let source_compile = engine()
+        .args([
+            "compile",
+            "--program",
+            source_program.to_str().unwrap(),
+            "--rulespec-root",
+            rulespec_root.to_str().unwrap(),
+            "--output",
+            source_artifact.to_str().unwrap(),
+        ])
+        .output()
+        .expect("compile provenance source artifact");
+    assert!(
+        source_compile.status.success(),
+        "source compile failed: {}",
+        String::from_utf8_lossy(&source_compile.stderr)
+    );
     let plan = fixture("nz_income_explorer_family.yaml");
     let request = fs::read(fixture("nz_income_explorer_request.json")).unwrap();
     let expected = fs::read(fixture("nz_income_explorer_result.json")).unwrap();
@@ -51,6 +79,8 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
                 "compile-unit-aggregation",
                 "--plan",
                 plan.to_str().unwrap(),
+                "--source-artifact",
+                source_artifact.to_str().unwrap(),
                 "--output",
                 artifact.to_str().unwrap(),
             ])

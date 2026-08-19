@@ -60,7 +60,6 @@
         "evidence": { "id": "age:child-0" }
       },
       "scalars": {
-        "best_start_before_care_and_abatement": { "status": "known", "value": "4041", "evidence": { "id": "scalar:child-0:best-start" } },
         "best_start_claimant_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-0:care" } },
         "in_work_tax_credit_child_exclusive_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-0:iwtc-care" } }
       },
@@ -70,6 +69,16 @@
         "in_work_tax_credit_principal_caregiver": { "status": "known", "value": true, "evidence": { "id": "iwtc-principal-care:child-0" } },
         "not_financially_independent_at_age_18": { "status": "known", "value": true, "evidence": { "id": "financial-dependence:child-0" } },
         "principal_care_for_family_scheme": { "status": "known", "value": true, "evidence": { "id": "principal-care:child-0" } }
+      },
+      "engine_computations": {
+        "best_start_before_care_and_abatement": {
+          "dataset": {
+            "inputs": [
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_entitlement_days", "entity": "Child", "entity_id": "child-0", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "integer", "value": 365 } },
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_child_care_fraction", "entity": "Child", "entity_id": "child-0", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "decimal", "value": "1" } }
+            ]
+          }
+        }
       }
     },
     {
@@ -82,7 +91,6 @@
         "evidence": { "id": "age:child-1" }
       },
       "scalars": {
-        "best_start_before_care_and_abatement": { "status": "known", "value": "4041", "evidence": { "id": "scalar:child-1:best-start" } },
         "best_start_claimant_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-1:care" } },
         "in_work_tax_credit_child_exclusive_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-1:iwtc-care" } }
       },
@@ -92,6 +100,16 @@
         "in_work_tax_credit_principal_caregiver": { "status": "known", "value": true, "evidence": { "id": "iwtc-principal-care:child-1" } },
         "not_financially_independent_at_age_18": { "status": "known", "value": true, "evidence": { "id": "financial-dependence:child-1" } },
         "principal_care_for_family_scheme": { "status": "known", "value": true, "evidence": { "id": "principal-care:child-1" } }
+      },
+      "engine_computations": {
+        "best_start_before_care_and_abatement": {
+          "dataset": {
+            "inputs": [
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_entitlement_days", "entity": "Child", "entity_id": "child-1", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "integer", "value": 365 } },
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_child_care_fraction", "entity": "Child", "entity_id": "child-1", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "decimal", "value": "1" } }
+            ]
+          }
+        }
       }
     }
   ],
@@ -128,10 +146,10 @@
       "anchor_person": "primary",
       "evidence": { "id": "family-input:primary" },
       "named_people": {
-        "mc7_entitlement_holder": {
+        "family_unit_reference_person": {
           "status": "known",
           "value": "primary",
-          "evidence": { "id": "mc7:primary" }
+          "evidence": { "id": "family-reference:primary" }
         }
       },
       "scalars": {

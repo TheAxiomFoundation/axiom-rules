@@ -41,6 +41,8 @@ family_reductions:
     citation:
       provision: Income Tax Act 2007 ss MG 1, MG 2, and MG 3
       authority: nz/statute/act/public/2007/0097/section/mg-3
+  # Even the sole nominally-safe reducer accepts a post-abatement child field
+  # and a caller-supplied zero as its "family once" field.
   - output: best_start_total
     gross_output: best_start_total_before_abatement
     operation: sum_children_then_subtract_family_once

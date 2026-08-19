@@ -112,6 +112,16 @@
         "citation": {
           "$ref": "#/$defs/AggregationCitation"
         },
+        "engine_computation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EngineComputationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/AggregationInputKind"
         },
@@ -402,6 +412,18 @@
         "id",
         "statement",
         "citation"
+      ],
+      "type": "object"
+    },
+    "EngineComputationBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id"
       ],
       "type": "object"
     },
@@ -714,12 +736,12 @@
         "citation": {
           "$ref": "#/$defs/AggregationCitation"
         },
-        "entitlement_holder_input": {
+        "reference_person_input": {
           "type": "string"
         }
       },
       "required": [
-        "entitlement_holder_input",
+        "reference_person_input",
         "citation",
         "caller_determination"
       ],
@@ -895,7 +917,7 @@
           "authority": "",
           "provision": ""
         },
-        "entitlement_holder_input": ""
+        "reference_person_input": ""
       }
     },
     "partner_relation": {
