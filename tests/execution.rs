@@ -3023,3 +3023,95 @@ fn mixed_parameter_and_derived_outputs_answer_in_one_query() {
         assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
     }
 }
+
+#[test]
+fn parameter_output_serializes_the_exact_amount_row_shape() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: monthly_kindergeld_per_child
+    kind: parameter
+    dtype: Money
+    unit: EUR
+    versions:
+      - effective_from: 2025-01-01
+        formula: 255
+      - effective_from: 2026-01-01
+        formula: 259
+"#;
+    let mut program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    program
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "monthly_kindergeld_per_child")
+        .expect("amount parameter")
+        .id = Some("de:statutes/estg/66#monthly_kindergeld_per_child".to_string());
+
+    let query_for = |year: i32| ExecutionQuery {
+        assessment_date: None,
+        entity_id: "case-0::tax_unit".to_string(),
+        period: PeriodSpec {
+            kind: PeriodKindSpec::Month,
+            start: chrono::NaiveDate::from_ymd_opt(year, 6, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(year, 6, 30).expect("valid date"),
+        },
+        outputs: vec!["de:statutes/estg/66#monthly_kindergeld_per_child".to_string()],
+    };
+
+    // 2025 period selects the 255 version; the serialized row is the exact
+    // shape the DE Kindergeld certificate premise validates.
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: program.clone(),
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![query_for(2025)],
+    })
+    .expect("2025 parameter query succeeds");
+    assert!(response.results[0].trace.is_empty());
+    let row = serde_json::to_value(
+        response.results[0]
+            .outputs
+            .get("de:statutes/estg/66#monthly_kindergeld_per_child")
+            .expect("amount output"),
+    )
+    .expect("output serializes");
+    assert_eq!(
+        row,
+        serde_json::json!({
+            "kind": "scalar",
+            "name": "monthly_kindergeld_per_child",
+            "id": "de:statutes/estg/66#monthly_kindergeld_per_child",
+            "dtype": "integer",
+            "unit": "EUR",
+            "value": {"kind": "integer", "value": 255},
+        })
+    );
+
+    // A 2026 period selects the later version: effective dating, not key
+    // shape, drives the answer.
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![query_for(2026)],
+    })
+    .expect("2026 parameter query succeeds");
+    let row = serde_json::to_value(
+        response.results[0]
+            .outputs
+            .get("de:statutes/estg/66#monthly_kindergeld_per_child")
+            .expect("amount output"),
+    )
+    .expect("output serializes");
+    assert_eq!(
+        row["value"],
+        serde_json::json!({"kind": "integer", "value": 259})
+    );
+}
