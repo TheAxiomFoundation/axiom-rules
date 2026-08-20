@@ -22,6 +22,24 @@ fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas")
 }
 
+#[cfg(feature = "unit-derivation")]
+struct NzGrossModuleSource;
+
+#[cfg(feature = "unit-derivation")]
+impl axiom_rules_engine::source::ModuleSource for NzGrossModuleSource {
+    fn load(
+        &self,
+        target: &str,
+    ) -> Result<Option<String>, axiom_rules_engine::source::SourceError> {
+        Ok(
+            (target == "nz:statutes/income_tax/family_scheme/tax_credits").then(|| {
+                include_str!("fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml")
+                    .to_string()
+            }),
+        )
+    }
+}
+
 #[test]
 fn schemas_are_current() {
     let dir = schemas_dir();
@@ -83,6 +101,84 @@ fn artifact_schema_accepts_a_real_compiled_artifact() {
         "compiled artifact did not validate against its own schema:\n{}",
         errors.join("\n")
     );
+}
+
+#[cfg(feature = "unit-derivation")]
+#[test]
+fn experimental_unit_aggregation_schemas_accept_the_exact_cli_fixtures() {
+    use axiom_rules_engine::unit_derivation::{
+        AggregationPlan, AggregationRequest, UnitDerivationConfig, UnitDerivationDocumentRegistry,
+    };
+
+    let fixture_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unit_derivation");
+    let source = std::fs::read_to_string(fixture_dir.join("nz_income_explorer_family.yaml"))
+        .expect("aggregation plan fixture is readable");
+    let request_source =
+        std::fs::read_to_string(fixture_dir.join("nz_income_explorer_request.json"))
+            .expect("aggregation request fixture is readable");
+    let plan: AggregationPlan = serde_yaml::from_str(&source).unwrap();
+    let request: AggregationRequest = serde_json::from_str(&request_source).unwrap();
+    let source_artifact = CompiledProgramArtifact::from_rulespec_with_source(
+        "nz:statutes/income_tax/family_scheme/tax_credits",
+        &NzGrossModuleSource,
+    )
+    .unwrap();
+    let mut registry = UnitDerivationDocumentRegistry::default();
+    let (plan_id, artifact_json) = {
+        let artifact = registry
+            .register_aggregation_source(&source, &source_artifact)
+            .unwrap();
+        (
+            artifact.plan_id().to_string(),
+            serde_json::to_value(artifact).unwrap(),
+        )
+    };
+    let result = registry
+        .execute_aggregation(
+            &plan_id,
+            &request,
+            &UnitDerivationConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let fixtures = [
+        (
+            "experimental-unit-aggregation-plan.stage3.schema.json",
+            serde_json::to_value(plan).unwrap(),
+        ),
+        (
+            "compiled-unit-aggregation.stage3.schema.json",
+            artifact_json,
+        ),
+        (
+            "unit-aggregation-request.stage3.schema.json",
+            serde_json::to_value(request).unwrap(),
+        ),
+        (
+            "unit-aggregation-result.stage3.schema.json",
+            serde_json::to_value(result).unwrap(),
+        ),
+    ];
+    let schemas = all_schemas();
+    for (name, fixture) in fixtures {
+        let schema = schemas
+            .iter()
+            .find(|schema| schema.file_name == name)
+            .unwrap();
+        let validator = jsonschema::draft7::new(&schema.schema).unwrap();
+        let errors = validator
+            .iter_errors(&fixture)
+            .map(|error| format!("{} at {}", error, error.instance_path()))
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "{name} rejected fixture:\n{}",
+            errors.join("\n")
+        );
+    }
 }
 
 #[test]

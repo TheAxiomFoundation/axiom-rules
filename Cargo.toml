@@ -42,7 +42,7 @@ schema = ["dep:schemars"]
 # Stage-2 prototype for the ratified unit-derivation semantics. The runtime
 # configuration inside the module is independently disabled by default. This
 # feature does not extend artifact v2 or any publication/launch surface.
-unit-derivation = []
+unit-derivation = ["dep:num-bigint"]
 
 [[bin]]
 name = "axiom-rules-engine"
@@ -53,6 +53,7 @@ required-features = ["fs"]
 # Default features off: the `clock` feature (wall-clock reads) stays out of
 # the core, which never reads the current time and must not on wasm hosts.
 chrono = { version = "0.4.42", default-features = false, features = ["serde", "std"] }
+num-bigint = { version = "0.4.6", optional = true }
 rust_decimal = { version = "1.39.0", features = ["maths", "serde"] }
 rust_decimal_macros = "1.39.0"
 schemars = { version = "1", features = ["chrono04", "rust_decimal1"], optional = true }

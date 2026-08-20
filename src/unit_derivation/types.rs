@@ -460,6 +460,43 @@ pub enum UnitDerivationError {
         existing_type: String,
         incoming_type: String,
     },
+    #[error(
+        "family-scoped reduction key `{key}` is consumed more than once: first by `{first}`, then by `{second}`"
+    )]
+    DuplicateFamilyScopeReduction {
+        key: String,
+        first: String,
+        second: String,
+    },
+    #[error(
+        "aggregation operand `{input}` for `{operation}` has scope/provenance `{found}`, expected `{expected}`"
+    )]
+    InvalidAggregationOperand {
+        operation: String,
+        input: String,
+        expected: String,
+        found: String,
+    },
+    #[error(
+        "child-gross operand `{input}` for `{operation}` on child `{child}` has provenance `{found}`, expected `{expected}`"
+    )]
+    InvalidChildGrossProvenance {
+        operation: String,
+        input: String,
+        child: String,
+        expected: String,
+        found: String,
+    },
+    #[error(
+        "relationship `{relation}` assigns family reference person `{person}` the forbidden role `{role}`"
+    )]
+    InvalidRelationshipRole {
+        relation: String,
+        person: String,
+        role: String,
+    },
+    #[error("compiled aggregation artifact is invalid: {0}")]
+    InvalidAggregationArtifact(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -492,6 +529,19 @@ pub struct RelationKnowledgeRecord {
     pub tuple: Vec<String>,
     pub interval: crate::model::Interval,
     pub truth: LiftedTruth,
+}
+
+/// An unresolved scalar/fact/age input carried beside the ordinary phase-2
+/// dataset. Determined values remain ordinary typed `InputRecord`s; this
+/// channel prevents the production dataset's closed-world lookup from
+/// converting an explicitly Unknown or Conflict input into absence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputKnowledgeRecord {
+    pub name: String,
+    pub entity: String,
+    pub entity_id: String,
+    pub interval: crate::model::Interval,
+    pub reduction: CompleteReduction<crate::model::ScalarValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
