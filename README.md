@@ -138,7 +138,7 @@ axiom-rules-engine capabilities
 ```json
 {
   "artifact_format_version": 2,
-  "engine_version": "0.2.1"
+  "engine_version": "0.2.2"
 }
 ```
 
