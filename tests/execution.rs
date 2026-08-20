@@ -2980,3 +2980,46 @@ fn unknown_query_outputs_still_error_with_parameters_present() {
     .expect_err("unknown outputs are rejected");
     assert_eq!(error.to_string(), "unknown derived output: no_such_output");
 }
+
+#[test]
+fn mixed_parameter_and_derived_outputs_answer_in_one_query() {
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
+    let period = simple_period();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: DatasetSpec {
+                inputs: vec![InputRecordSpec {
+                    name: "amount".to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: decimal_value("5"),
+                }],
+                relations: vec![],
+            },
+            queries: vec![ExecutionQuery {
+                assessment_date: None,
+                entity_id: "household-1".to_string(),
+                period: period.clone(),
+                outputs: vec!["adjusted_amount".to_string(), "base_amount".to_string()],
+            }],
+        })
+        .expect("mixed query succeeds");
+        let outputs = &response.results[0].outputs;
+        assert_eq!(
+            decimal_output(outputs.get("base_amount").expect("parameter")),
+            decimal("10")
+        );
+        assert_eq!(
+            decimal_output(outputs.get("adjusted_amount").expect("derived")),
+            decimal("15")
+        );
+        assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
+    }
+}
