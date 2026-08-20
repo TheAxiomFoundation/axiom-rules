@@ -1032,6 +1032,30 @@ impl<'a> Engine<'a> {
         Ok(selected.value.clone())
     }
 
+    /// Evaluate a non-indexed parameter at a period for a direct query
+    /// output. Indexed parameters need a key expression, so they stay
+    /// reachable only through derived formulas.
+    pub fn evaluate_parameter(
+        &mut self,
+        name: &str,
+        period: &Period,
+    ) -> Result<ScalarValue, EvalError> {
+        let indexed_by = {
+            let parameter = self
+                .program
+                .parameters
+                .get(name)
+                .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
+            parameter.indexed_by.clone()
+        };
+        if indexed_by.is_some() {
+            return Err(EvalError::TypeMismatch(format!(
+                "parameter `{name}` is indexed; query it through a derived rule"
+            )));
+        }
+        self.lookup_parameter(name, 0, period)
+    }
+
     fn lookup_parameter(
         &mut self,
         name: &str,

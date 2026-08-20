@@ -806,6 +806,19 @@ pub enum DTypeSpec {
 }
 
 impl DTypeSpec {
+    /// Runtime dtype of an already-evaluated value. Parameters do not carry a
+    /// declared dtype in the compiled program, so their query outputs report
+    /// the dtype of the selected value.
+    pub fn from_scalar_value(value: &ScalarValue) -> Self {
+        match value {
+            ScalarValue::Bool(_) => Self::Bool,
+            ScalarValue::Integer(_) => Self::Integer,
+            ScalarValue::Decimal(_) => Self::Decimal,
+            ScalarValue::Text(_) => Self::Text,
+            ScalarValue::Date(_) => Self::Date,
+        }
+    }
+
     pub fn from_model(dtype: &DType) -> Self {
         match dtype {
             DType::Judgment => Self::Judgment,

@@ -2780,3 +2780,203 @@ fn judgment_output(output: &OutputValue) -> JudgmentOutcomeSpec {
 fn decimal(value: &str) -> Decimal {
     Decimal::from_str(value).expect("valid decimal literal")
 }
+
+#[test]
+fn non_indexed_parameters_are_queryable_outputs_in_every_mode() {
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
+    let period = simple_period();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: DatasetSpec {
+                inputs: vec![],
+                relations: vec![],
+            },
+            queries: vec![ExecutionQuery {
+                assessment_date: None,
+                entity_id: "household-1".to_string(),
+                period: period.clone(),
+                outputs: vec!["base_amount".to_string()],
+            }],
+        })
+        .expect("parameter query succeeds");
+        let output = response.results[0]
+            .outputs
+            .get("base_amount")
+            .expect("parameter output");
+        assert_eq!(decimal_output(output), decimal("10"));
+        let OutputValue::Scalar {
+            name,
+            id,
+            dtype,
+            unit,
+            ..
+        } = output
+        else {
+            panic!("parameter output is a scalar");
+        };
+        assert_eq!(name, "base_amount");
+        assert_eq!(id.as_deref(), None);
+        // Whole-number literals lower to integers; the output reports the
+        // runtime dtype of the selected value.
+        assert_eq!(*dtype, DTypeSpec::Integer);
+        assert_eq!(unit.as_deref(), Some("USD"));
+        assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
+        if mode == ExecutionMode::Fast {
+            let reason = response
+                .metadata
+                .fallback_reason
+                .clone()
+                .expect("fast mode reports the parameter fallback");
+            assert!(reason.contains("parameter output"));
+        }
+    }
+}
+
+#[test]
+fn parameter_outputs_resolve_by_canonical_id_when_present() {
+    let mut program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
+    let parameter = program
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "base_amount")
+        .expect("base amount parameter");
+    parameter.id = Some("us:statutes/example/1#base_amount".to_string());
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: program.clone(),
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period: simple_period(),
+            outputs: vec!["us:statutes/example/1#base_amount".to_string()],
+        }],
+    })
+    .expect("id-addressed parameter query succeeds");
+    let output = response.results[0]
+        .outputs
+        .get("us:statutes/example/1#base_amount")
+        .expect("output keyed by canonical id");
+    assert_eq!(decimal_output(output), decimal("10"));
+    let OutputValue::Scalar { id, .. } = output else {
+        panic!("parameter output is a scalar");
+    };
+    assert_eq!(id.as_deref(), Some("us:statutes/example/1#base_amount"));
+
+    // With an id present the bare name is no longer addressable, matching
+    // derived-rule resolution.
+    let error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period: simple_period(),
+            outputs: vec!["base_amount".to_string()],
+        }],
+    })
+    .expect_err("bare name is not addressable once an id exists");
+    assert_eq!(error.to_string(), "unknown derived output: base_amount");
+}
+
+#[test]
+fn indexed_parameters_are_not_directly_queryable() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: phase_in_rates
+    kind: parameter
+    dtype: Rate
+    indexed_by: qualifying_child_count
+    versions:
+      - effective_from: 2026-01-01
+        values:
+          0: 0.0765
+          1: 0.34
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period: simple_period(),
+            outputs: vec!["phase_in_rates".to_string()],
+        }],
+    })
+    .expect_err("indexed parameters need a key expression");
+    assert!(
+        error
+            .to_string()
+            .contains("is indexed; query it through a derived rule"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn parameter_outputs_without_a_covering_version_error() {
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
+    let error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period: PeriodSpec {
+                kind: PeriodKindSpec::Month,
+                start: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date"),
+                end: chrono::NaiveDate::from_ymd_opt(2025, 1, 31).expect("valid date"),
+            },
+            outputs: vec!["base_amount".to_string()],
+        }],
+    })
+    .expect_err("no version covers 2025");
+    assert!(
+        error.to_string().contains("base_amount"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn unknown_query_outputs_still_error_with_parameters_present() {
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
+    let error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period: simple_period(),
+            outputs: vec!["no_such_output".to_string()],
+        }],
+    })
+    .expect_err("unknown outputs are rejected");
+    assert_eq!(error.to_string(), "unknown derived output: no_such_output");
+}
