@@ -321,9 +321,37 @@ fn execute_explain(
         let mut outputs = BTreeMap::new();
 
         for output_reference in &query.outputs {
-            let output_name = program
-                .resolve_derived_name(output_reference)
-                .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+            let Some(output_name) = program.resolve_derived_name(output_reference) else {
+                // A non-indexed parameter is a first-class statutory fact
+                // (for example a bare amount provision), so it is queryable
+                // directly; anything else stays an unknown output.
+                let parameter_name = program
+                    .resolve_parameter_name(output_reference)
+                    .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+                let parameter = program
+                    .parameters
+                    .get(&parameter_name)
+                    .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+                let output_key = parameter
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| parameter_name.clone());
+                let name = parameter.name.clone();
+                let id = parameter.id.clone();
+                let unit = parameter.unit.clone();
+                let value = engine.evaluate_parameter(&parameter_name, &period)?;
+                outputs.insert(
+                    output_key,
+                    OutputValue::Scalar {
+                        name,
+                        id,
+                        dtype: DTypeSpec::from_scalar_value(&value),
+                        unit,
+                        value: ScalarValueSpec::from_model(value),
+                    },
+                );
+                continue;
+            };
             let derived = program
                 .derived
                 .get(&output_name)

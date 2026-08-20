@@ -109,9 +109,18 @@ pub fn try_execute(
     let mut requested = HashSet::new();
     for query in queries {
         for output_reference in &query.outputs {
-            let output_name = program
-                .resolve_derived_name(output_reference)
-                .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+            let Some(output_name) = program.resolve_derived_name(output_reference) else {
+                if program.resolve_parameter_name(output_reference).is_some() {
+                    // Parameter outputs evaluate on the explain path; report
+                    // Unsupported so fast mode falls back instead of erroring.
+                    return Ok(FastPathResult::Unsupported {
+                        reason: format!(
+                            "parameter output `{output_reference}` uses the explain path"
+                        ),
+                    });
+                }
+                return Err(EvalError::UnknownDerived(output_reference.clone()));
+            };
             requested.insert(output_name.to_string());
         }
     }
