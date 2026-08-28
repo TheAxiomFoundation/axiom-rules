@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use axiom_rules_engine::api::{
     ApiError, CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest,
-    ExecutionResponse, OutputValue, execute_compiled_request, execute_request,
+    ExecutionResponse, OutputValue, RulePin, execute_compiled_request, execute_request,
 };
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::engine::EvalError;
@@ -2269,6 +2269,69 @@ rules:
 }
 
 #[test]
+fn pinned_versioned_rule_evaluates_to_the_pin_in_every_mode() {
+    // adjusted_amount is a VERSIONED rule: its formula lives in
+    // versions[0], not in a top-level expression. The pin must therefore
+    // land in the version the engine actually selects for the dated query
+    // — pinning only a top-level expression is exactly the silent-baseline
+    // bug this feature exists to prevent.
+    let period = simple_period();
+    for mode in [ExecutionMode::Fast, ExecutionMode::Explain] {
+        let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+            .expect("RuleSpec module compiles from YAML");
+        let response = execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: mode.clone(),
+                dataset: simple_dataset(&period),
+                queries: simple_queries(&period),
+                pins: vec![RulePin {
+                    rule: "adjusted_amount".to_string(),
+                    value: ScalarValueSpec::Decimal {
+                        value: "99".to_string(),
+                    },
+                }],
+            },
+        )
+        .expect("pinned compiled request succeeds");
+        assert_eq!(
+            decimal_output(
+                response.results[0]
+                    .outputs
+                    .get("adjusted_amount")
+                    .expect("adjusted amount output")
+            ),
+            decimal("99"),
+            "pin must override the versioned formula in {mode:?} mode"
+        );
+    }
+}
+
+#[test]
+fn pinning_an_unknown_rule_is_an_error_not_a_silent_no_op() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles from YAML");
+    let period = simple_period();
+    let error = execute_compiled_request(
+        artifact,
+        CompiledExecutionRequest {
+            mode: ExecutionMode::Fast,
+            dataset: simple_dataset(&period),
+            queries: simple_queries(&period),
+            pins: vec![RulePin {
+                rule: "no_such_rule".to_string(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            }],
+        },
+    )
+    .expect_err("unknown pinned rule must fail loudly");
+    assert!(
+        matches!(&error, ApiError::UnknownPinnedRule { rule } if rule == "no_such_rule"),
+        "got {error:?}"
+    );
+}
+
+#[test]
 fn compiled_program_artifact_round_trips_and_executes() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
@@ -2280,6 +2343,7 @@ fn compiled_program_artifact_round_trips_and_executes() {
             mode: ExecutionMode::Fast,
             dataset: simple_dataset(&period),
             queries: simple_queries(&period),
+            pins: Vec::new(),
         },
     )
     .expect("compiled request succeeds");
@@ -2349,6 +2413,7 @@ fn cli_compile_and_run_compiled_round_trip() {
         mode: ExecutionMode::Fast,
         dataset,
         queries,
+        pins: Vec::new(),
     };
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
@@ -2444,6 +2509,7 @@ fn run_compiled_emits_relation_slot_entity_warning_to_stderr() {
             }],
         },
         queries: Vec::new(),
+        pins: Vec::new(),
     };
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
@@ -2566,6 +2632,7 @@ fn assessment_date_round_trips_and_evaluates_identically() {
             mode: ExecutionMode::Fast,
             dataset: simple_dataset(&period),
             queries: compiled_queries,
+            pins: Vec::new(),
         },
     )
     .expect("compiled request with assessment_date succeeds");
