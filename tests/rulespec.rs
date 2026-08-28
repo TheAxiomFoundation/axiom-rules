@@ -339,6 +339,70 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_swiss_franc_money_parameter() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Zurich wealth tax scale (CHF unit check)
+rules:
+  - name: zurich_wealth_tax_first_band_width
+    kind: parameter
+    dtype: Money
+    unit: CHF
+    source: "Zurich Tax Act section 47"
+    versions:
+      - effective_from: 2026-01-01
+        formula: "81000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("CHF RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let chf = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "CHF")
+        .expect("CHF should be a seeded currency unit");
+    assert!(matches!(
+        chf.kind,
+        UnitKindSpec::Currency { minor_units: 2 }
+    ));
+}
+
+#[test]
+fn rulespec_lowers_norwegian_krone_money_parameter() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Norway wealth tax allowance (NOK unit check)
+rules:
+  - name: wealth_tax_basic_allowance
+    kind: parameter
+    dtype: Money
+    unit: NOK
+    source: "Norwegian Tax Administration 2022 wealth tax rates"
+    versions:
+      - effective_from: 2022-01-01
+        formula: "1700000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("NOK RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let nok = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "NOK")
+        .expect("NOK should be a seeded currency unit");
+    assert!(matches!(
+        nok.kind,
+        UnitKindSpec::Currency { minor_units: 2 }
+    ));
+}
+
+#[test]
 fn rulespec_lowers_rwandan_franc_money_parameter() {
     // Rwandan Franc (RWF, ISO 4217, exponent 0 — no minor unit in
     // circulation) must be a seeded currency so rulespec-rw modules can

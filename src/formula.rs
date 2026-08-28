@@ -1130,6 +1130,10 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         ("GBP", UnitKindSpec::Currency { minor_units: 2 }),
         ("USD", UnitKindSpec::Currency { minor_units: 2 }),
         ("EUR", UnitKindSpec::Currency { minor_units: 2 }),
+        // Swiss Franc: ISO 4217 exponent 2 (100 rappen = 1 franc).
+        ("CHF", UnitKindSpec::Currency { minor_units: 2 }),
+        // Norwegian Krone: ISO 4217 exponent 2 (100 øre = 1 krone).
+        ("NOK", UnitKindSpec::Currency { minor_units: 2 }),
         ("GHS", UnitKindSpec::Currency { minor_units: 2 }),
         // Ghana pesewas: the Energy Sector Levies Act, 2025 schedule states
         // its per-litre and per-kilogramme rates in GHp, so modules ground
