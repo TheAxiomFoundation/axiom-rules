@@ -339,6 +339,42 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_armenian_dram_money_parameter() {
+    // Armenian Dram (AMD, ISO 4217, 2 minor units = luma) must be a
+    // seeded currency so rulespec-am modules can declare `unit: AMD`
+    // without a repo inline unit declaration, exactly like DKK/CHF/NOK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Armenian dram currency unit check
+rules:
+  - name: representative_amount
+    kind: parameter
+    dtype: Money
+    unit: AMD
+    source: "Central Bank of Armenia: national currency is the dram (AMD), 100 luma = 1 dram"
+    versions:
+      - effective_from: 1993-11-22
+        formula: "1"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("AMD RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let amd = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "AMD")
+        .expect("AMD should be a seeded currency unit");
+    assert!(
+        matches!(amd.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "AMD must carry the ISO 4217 exponent (100 luma = 1 dram): {:?}",
+        amd.kind
+    );
+}
+
+#[test]
 fn rulespec_lowers_swiss_franc_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
