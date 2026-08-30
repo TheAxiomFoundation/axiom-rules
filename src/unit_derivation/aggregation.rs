@@ -2513,6 +2513,7 @@ fn execute_engine_computation(
             outputs: vec![binding.rule_id.clone()],
             assessment_date: None,
         }],
+        pins: Vec::new(),
     };
     let response = crate::api::execute_compiled_request(artifact.source_artifact.clone(), request)
         .map_err(|error| {

@@ -8,7 +8,8 @@ use crate::compile::CompiledProgramArtifact;
 use crate::engine::{Engine, EvalError};
 use crate::model::{DerivedSemantics, JudgmentOutcome};
 use crate::spec::{
-    DTypeSpec, DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, JudgmentExprSpec,
+    JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec, ScalarExprSpec,
     ScalarValueSpec,
 };
 
@@ -25,6 +26,25 @@ pub struct CompiledExecutionRequest {
     pub mode: ExecutionMode,
     pub dataset: DatasetSpec,
     pub queries: Vec<ExecutionQuery>,
+    /// Caller-supplied rule pins: each named derived rule evaluates to the
+    /// given literal for this request, on every date the rule exists. The
+    /// engine rewrites the program before execution — the rule's semantics
+    /// and every version's semantics become the literal, keeping effective
+    /// ranges — so all execution modes honour the pin identically and the
+    /// caller never has to edit an artifact. Naming a rule the program does
+    /// not contain is an error, not a no-op: a pin that silently fails to
+    /// bind would hand the caller baseline results labelled as a
+    /// counterfactual.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<RulePin>,
+}
+
+/// One rule pin: `rule` is the derived rule's name, `value` the literal it
+/// evaluates to for this request. Judgment rules are not pinnable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RulePin {
+    pub rule: String,
+    pub value: ScalarValueSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +233,10 @@ pub enum ApiError {
         assessment_date: NaiveDate,
         period_start: NaiveDate,
     },
+    #[error("pinned rule `{rule}` does not exist in the program")]
+    UnknownPinnedRule { rule: String },
+    #[error("rule `{rule}` is a judgment and cannot be pinned to a scalar value")]
+    JudgmentRuleNotPinnable { rule: String },
 }
 
 /// Reject queries whose `assessment_date` predates the period they assess.
@@ -299,12 +323,78 @@ pub fn execute_compiled_request(
     artifact: CompiledProgramArtifact,
     request: CompiledExecutionRequest,
 ) -> Result<ExecutionResponse, ApiError> {
+    let mut program = artifact.program;
+    apply_pins(&mut program, &request.pins)?;
     execute_request(ExecutionRequest {
         mode: request.mode,
-        program: artifact.program,
+        program,
         dataset: request.dataset,
         queries: request.queries,
     })
+}
+
+/// Rewrite each pinned rule so it evaluates to the caller's literal.
+///
+/// A pin is a VALUE override, not a program edit: it must leave the
+/// program's static surface — input catalog, dependency references,
+/// effective ranges — exactly as published, because everything else in the
+/// system reasons against that surface (dataset inputs are validated as
+/// references into it, derived metadata is a function of it). So the pin
+/// wraps rather than substitutes: each expression becomes
+/// `if <trivially-true> then <literal> else <original>`. Evaluation always
+/// takes the literal; the original expression survives as a never-taken
+/// branch whose references keep the static surface intact. Both the rule's
+/// own semantics and every version's semantics are wrapped, with effective
+/// ranges untouched, so the pin holds on every date the rule exists.
+///
+/// Runs on the program the engine is about to execute, so every execution
+/// mode sees the same pinned program.
+fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
+    for pin in pins {
+        let rule = program
+            .derived
+            .iter_mut()
+            .find(|derived| derived.name == pin.rule)
+            .ok_or_else(|| ApiError::UnknownPinnedRule {
+                rule: pin.rule.clone(),
+            })?;
+        let judgment = matches!(rule.semantics, DerivedSemanticsSpec::Judgment { .. })
+            || rule
+                .versions
+                .iter()
+                .any(|version| matches!(version.semantics, DerivedSemanticsSpec::Judgment { .. }));
+        if judgment {
+            return Err(ApiError::JudgmentRuleNotPinnable {
+                rule: pin.rule.clone(),
+            });
+        }
+        let pin_expr = |original: ScalarExprSpec| DerivedSemanticsSpec::Scalar {
+            expr: ScalarExprSpec::If {
+                condition: Box::new(JudgmentExprSpec::Comparison {
+                    left: Box::new(ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Integer { value: 0 },
+                    }),
+                    op: ComparisonOpSpec::Eq,
+                    right: Box::new(ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Integer { value: 0 },
+                    }),
+                }),
+                then_expr: Box::new(ScalarExprSpec::Literal {
+                    value: pin.value.clone(),
+                }),
+                else_expr: Box::new(original),
+            },
+        };
+        if let DerivedSemanticsSpec::Scalar { expr } = rule.semantics.clone() {
+            rule.semantics = pin_expr(expr);
+        }
+        for version in &mut rule.versions {
+            if let DerivedSemanticsSpec::Scalar { expr } = version.semantics.clone() {
+                version.semantics = pin_expr(expr);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn execute_explain(
