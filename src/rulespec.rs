@@ -1487,7 +1487,14 @@ fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
             root.display()
         )));
     }
-    for content_root in RULESPEC_FILESYSTEM_ROOTS {
+    // Declarative ProgramSpecs intentionally live at
+    // `programs/<jurisdiction>/...` in canonical country repositories and are
+    // consumed by `axiom-compose`, not by the atomic RuleSpec loader. Keep
+    // rejecting atomic module roots at the checkout root, but permit that
+    // separate declarative program inventory; the directory-entry checks
+    // below still reject aliases and symlinks, and it is never searched as an
+    // atomic module root.
+    for content_root in RULESPEC_ATOMIC_ROOTS {
         if root.join(content_root).exists() {
             return Err(repository_root_error(format!(
                 "root-level `{content_root}/` is forbidden in `{}`; content belongs below a direct jurisdiction directory",
@@ -1601,6 +1608,13 @@ fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
 
 #[cfg(feature = "fs")]
 fn validate_content_tree(root: &Path) -> Result<(), RuleSpecError> {
+    // A country checkout can retain frozen pre-canonical modules while they
+    // are migrated in place. They are not addressable by canonical module
+    // targets, so repository admission only needs to prove that the ambient
+    // tree contains real directories and regular files and no symlink or
+    // special-path indirection. `validate_exact_regular_yaml` still applies
+    // the strict filename/extension contract to every module that is actually
+    // loaded, preventing a legacy sibling from becoming executable authority.
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory).map_err(|error| {
@@ -1611,25 +1625,12 @@ fn validate_content_tree(root: &Path) -> Result<(), RuleSpecError> {
             })?;
             let path = entry.path();
             let name = entry.file_name();
-            let name = name.to_str().ok_or_else(|| {
+            name.to_str().ok_or_else(|| {
                 repository_root_error(format!(
                     "non-UTF-8 path component `{}` is forbidden",
                     path.display()
                 ))
             })?;
-            if name.chars().any(char::is_whitespace)
-                || name
-                    .chars()
-                    .any(|ch| matches!(ch, '#' | ':' | '"' | '\'' | '\\'))
-                || !name.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'~')
-                })
-            {
-                return Err(repository_root_error(format!(
-                    "non-canonical path component `{name}` in `{}`",
-                    path.display()
-                )));
-            }
             let file_type = entry.file_type().map_err(|error| {
                 repository_root_error(format!("cannot inspect `{}`: {error}", path.display()))
             })?;
@@ -1646,20 +1647,6 @@ fn validate_content_tree(root: &Path) -> Result<(), RuleSpecError> {
                     "special path `{}` is forbidden",
                     path.display()
                 )));
-            } else if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
-                let extension_lower = extension.to_ascii_lowercase();
-                if matches!(extension_lower.as_str(), "yaml" | "yml") && extension != "yaml" {
-                    return Err(repository_root_error(format!(
-                        "YAML file `{}` must use the exact `.yaml` extension",
-                        path.display()
-                    )));
-                }
-                if extension == "yaml" && has_yaml_like_stem(&path) {
-                    return Err(repository_root_error(format!(
-                        "YAML file `{}` has an ambiguous YAML-like double extension",
-                        path.display()
-                    )));
-                }
             }
         }
     }

@@ -6,7 +6,7 @@ use axiom_rules_engine::compile::{
 };
 use axiom_rules_engine::rulespec::{
     CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
-    ValidationStatus, load_rulespec_file_with_options, lower_rulespec_str,
+    ValidationStatus, load_rulespec_file, load_rulespec_file_with_options, lower_rulespec_str,
     lower_rulespec_str_with_options,
 };
 use axiom_rules_engine::spec::{
@@ -3819,6 +3819,75 @@ rules:
             .to_string()
             .contains("RuleSpec file `us:policies/tax/filing-credit`")
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn canonical_repository_allows_root_level_declarative_program_specs() {
+    let root = unique_test_root();
+    let repository = root.join("rulespec-us");
+    fs::create_dir_all(repository.join("us/statutes"))
+        .expect("create canonical atomic content root");
+    let program = repository.join("programs/us/snap/fy-2026.yaml");
+    fs::create_dir_all(program.parent().expect("program has parent"))
+        .expect("create declarative program directory");
+    fs::write(
+        &program,
+        "program: us/snap\nperiod: 2026-01\noutputs: [snap_benefit]\n",
+    )
+    .expect("write declarative ProgramSpec");
+
+    CanonicalRuleSpecRoots::new([&repository])
+        .expect("root-level declarative ProgramSpecs are not atomic RuleSpec roots");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn canonical_repository_still_rejects_root_level_atomic_content() {
+    let root = unique_test_root();
+    let repository = root.join("rulespec-us");
+    fs::create_dir_all(repository.join("us/statutes"))
+        .expect("create canonical atomic content root");
+    fs::create_dir_all(repository.join("statutes"))
+        .expect("create forbidden root-level atomic content root");
+
+    let error = CanonicalRuleSpecRoots::new([&repository])
+        .expect_err("root-level atomic RuleSpec content must remain forbidden");
+    assert!(
+        error
+            .to_string()
+            .contains("root-level `statutes/` is forbidden")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn canonical_repository_allows_unaddressable_legacy_siblings() {
+    let root = unique_test_root();
+    let repository = root.join("rulespec-us");
+    let canonical = repository.join("us/statutes/7/current.yaml");
+    let legacy = repository.join("us/statutes/42/1437c–1.yaml");
+    fs::create_dir_all(canonical.parent().expect("canonical file has parent"))
+        .expect("create canonical module directory");
+    fs::create_dir_all(legacy.parent().expect("legacy file has parent"))
+        .expect("create legacy module directory");
+    fs::write(&canonical, "format: rulespec/v1\nrules: []\n").expect("write canonical RuleSpec");
+    fs::write(&legacy, "format: rulespec/v1\nrules: []\n").expect("write legacy RuleSpec");
+
+    let roots = CanonicalRuleSpecRoots::new([&repository])
+        .expect("an unrelated frozen legacy sibling does not invalidate the repository");
+    load_rulespec_file(&canonical, &roots).expect("canonical module remains loadable");
+
+    let error = load_rulespec_file(&legacy, &roots)
+        .expect_err("legacy sibling must not become addressable as an atomic module");
+    assert!(
+        matches!(error, RuleSpecError::InvalidFilesystemPath { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("canonical module target"));
 
     let _ = fs::remove_dir_all(root);
 }

@@ -300,12 +300,17 @@ fn programs_and_yml_are_never_atomic_modules() {
 
     let yml = root.join("us/policies/legacy.yml");
     std::fs::write(&yml, BASE_MODULE).expect("legacy yml");
-    assert!(CanonicalRuleSpecRoots::new([&root]).is_err());
+    let roots = CanonicalRuleSpecRoots::new([&root])
+        .expect("an ambient legacy extension does not invalidate canonical modules");
+    assert!(matches!(
+        load_rulespec_file(&yml, &roots),
+        Err(RuleSpecError::InvalidFilesystemPath { .. })
+    ));
     std::fs::remove_dir_all(temp).ok();
 }
 
 #[test]
-fn roots_reject_ambiguous_extensions_and_reserved_path_aliases() {
+fn roots_leave_ambiguous_extensions_and_reserved_path_aliases_unaddressable() {
     for (label, relative) in [
         ("double-yaml", "us/policies/foo.yaml.yaml"),
         ("double-yml", "us/policies/foo.yml.yaml"),
@@ -321,12 +326,20 @@ fn roots_reject_ambiguous_extensions_and_reserved_path_aliases() {
         let temp = temp_dir(label);
         let root = temp.join("rulespec-us");
         let path = root.join(relative);
+        let canonical = root.join("us/policies/base.yaml");
         std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
+        std::fs::write(&canonical, BASE_MODULE).expect("canonical fixture");
         std::fs::write(&path, BASE_MODULE).expect("invalid fixture");
+        let roots = CanonicalRuleSpecRoots::new([&root])
+            .expect("ambient legacy names do not invalidate canonical modules");
         assert!(
-            CanonicalRuleSpecRoots::new([&root]).is_err(),
-            "non-canonical path must fail: {relative}"
+            matches!(
+                load_rulespec_file(&path, &roots),
+                Err(RuleSpecError::InvalidFilesystemPath { .. })
+            ),
+            "non-canonical path must remain unaddressable: {relative}"
         );
+        load_rulespec_file(&canonical, &roots).expect("canonical sibling remains loadable");
         std::fs::remove_dir_all(temp).ok();
     }
 }
