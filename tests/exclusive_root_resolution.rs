@@ -415,3 +415,30 @@ fn symlinked_roots_and_content_are_rejected() {
     assert!(CanonicalRuleSpecRoots::new([&root]).is_err());
     std::fs::remove_dir_all(temp).ok();
 }
+
+#[cfg(unix)]
+#[test]
+fn root_level_program_inventory_rejects_nested_symlinks_and_special_files() {
+    use std::os::unix::fs::symlink;
+
+    let (symlink_temp, symlink_root, _) = canonical_fixture("program-symlink-rejection");
+    let external = symlink_temp.join("external.yaml");
+    std::fs::write(&external, BASE_MODULE).expect("external module");
+    let program_dir = symlink_root.join("programs/us/snap");
+    std::fs::create_dir_all(&program_dir).expect("program directory");
+    symlink(&external, program_dir.join("linked.yaml")).expect("nested program symlink");
+    assert!(CanonicalRuleSpecRoots::new([&symlink_root]).is_err());
+    std::fs::remove_dir_all(symlink_temp).ok();
+
+    let (socket_temp, socket_root, _) = canonical_fixture("program-special-rejection");
+    let program_dir = socket_root.join("programs/us/snap");
+    std::fs::create_dir_all(&program_dir).expect("program directory");
+    let fifo_path = program_dir.join("generator.fifo");
+    let status = Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .expect("invoke mkfifo");
+    assert!(status.success(), "create nested program FIFO");
+    assert!(CanonicalRuleSpecRoots::new([&socket_root]).is_err());
+    std::fs::remove_dir_all(socket_temp).ok();
+}

@@ -1502,6 +1502,27 @@ fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
             )));
         }
     }
+    let declarative_programs = root.join("programs");
+    match fs::symlink_metadata(&declarative_programs) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(repository_root_error(format!(
+                    "declarative program root `{}` must be a real directory",
+                    declarative_programs.display()
+                )));
+            }
+            validate_exact_component_spelling(&declarative_programs)
+                .map_err(repository_root_error)?;
+            validate_content_tree(&declarative_programs)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(repository_root_error(format!(
+                "cannot inspect `{}`: {error}",
+                declarative_programs.display()
+            )));
+        }
+    }
 
     let mut jurisdiction_count = 0usize;
     let mut content_root_count = 0usize;
