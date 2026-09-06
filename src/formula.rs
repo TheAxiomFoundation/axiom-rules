@@ -1161,6 +1161,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Armenian Dram: ISO 4217 exponent 2 (100 luma = 1 dram);
         // Armenian statutes state amounts in drams.
         ("AMD", UnitKindSpec::Currency { minor_units: 2 }),
+        // New Israeli Shekel: ISO 4217 exponent 2 (100 agorot = 1
+        // shekel); Israeli statutes state amounts in shekels.
+        ("ILS", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
