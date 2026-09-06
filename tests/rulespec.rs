@@ -375,6 +375,42 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_new_israeli_shekel_money_parameter() {
+    // New Israeli Shekel (ILS, ISO 4217, 2 minor units = agorot) must be
+    // a seeded currency so rulespec-il modules can declare `unit: ILS`
+    // without a repo inline unit declaration, exactly like DKK/AMD/ETB.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: New Israeli shekel currency unit check
+rules:
+  - name: representative_amount
+    kind: parameter
+    dtype: Money
+    unit: ILS
+    source: "Bank of Israel: the national currency is the new shekel (ILS), 100 agorot = 1 shekel"
+    versions:
+      - effective_from: 1985-09-04
+        formula: "1"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("ILS RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let ils = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "ILS")
+        .expect("ILS should be a seeded currency unit");
+    assert!(
+        matches!(ils.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "ILS must carry the ISO 4217 exponent (100 agorot = 1 shekel): {:?}",
+        ils.kind
+    );
+}
+
+#[test]
 fn rulespec_lowers_swiss_franc_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
