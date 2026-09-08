@@ -3157,6 +3157,14 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(date, alias, relation_name);
             rewrite_relation_alias_in_scalar(days, alias, relation_name);
         }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            rewrite_relation_alias_in_scalar(date, alias, relation_name);
+            rewrite_relation_alias_in_scalar(months, alias, relation_name);
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            rewrite_relation_alias_in_scalar(date, alias, relation_name);
+            rewrite_relation_alias_in_scalar(years, alias, relation_name);
+        }
         ScalarExprSpec::DaysBetween { from, to } => {
             rewrite_relation_alias_in_scalar(from, alias, relation_name);
             rewrite_relation_alias_in_scalar(to, alias, relation_name);
@@ -3457,6 +3465,14 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(date, names);
             collect_scalar_relation_names(days, names);
         }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            collect_scalar_relation_names(date, names);
+            collect_scalar_relation_names(months, names);
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            collect_scalar_relation_names(date, names);
+            collect_scalar_relation_names(years, names);
+        }
         ScalarExprSpec::DaysBetween { from, to } => {
             collect_scalar_relation_names(from, names);
             collect_scalar_relation_names(to, names);
@@ -3588,6 +3604,38 @@ fn rewrite_scalar_relation_references(
             );
             rewrite_scalar_relation_references(
                 days,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+        }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            rewrite_scalar_relation_references(
+                date,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                months,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            rewrite_scalar_relation_references(
+                date,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                years,
                 origin_target,
                 rewrites,
                 unambiguous_short_rewrites,
@@ -3864,6 +3912,14 @@ fn scalar_uses_imported_derived(
         ScalarExprSpec::DateAddDays { date, days } => {
             scalar_uses_imported_derived(date, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(days, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            scalar_uses_imported_derived(date, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(months, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            scalar_uses_imported_derived(date, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(years, origin_target, derived_origin_targets)
         }
         ScalarExprSpec::DaysBetween { from, to } => {
             scalar_uses_imported_derived(from, origin_target, derived_origin_targets)
