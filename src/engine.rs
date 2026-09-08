@@ -8,6 +8,42 @@ use crate::model::{
     Program, RelatedValueRef, ScalarExpr, ScalarValue,
 };
 
+/// Shift by calendar months, clamping a missing target day to month end.
+/// Legal rules decide their own inclusive/exclusive boundaries around this
+/// date operation. Overflow is an evaluation error, never a panic.
+pub(crate) fn shift_calendar_months(
+    base: chrono::NaiveDate,
+    offset: i64,
+) -> Result<chrono::NaiveDate, EvalError> {
+    let result = u32::try_from(offset.unsigned_abs()).ok().and_then(|count| {
+        let months = chrono::Months::new(count);
+        if offset < 0 {
+            base.checked_sub_months(months)
+        } else {
+            base.checked_add_months(months)
+        }
+    });
+    result.ok_or_else(|| {
+        EvalError::TypeMismatch(
+            "date_add_months result is outside the supported date range".to_string(),
+        )
+    })
+}
+
+pub(crate) fn shift_calendar_years(
+    base: chrono::NaiveDate,
+    offset: i64,
+) -> Result<chrono::NaiveDate, EvalError> {
+    offset
+        .checked_mul(12)
+        .and_then(|months| shift_calendar_months(base, months).ok())
+        .ok_or_else(|| {
+            EvalError::TypeMismatch(
+                "date_add_years result is outside the supported date range".to_string(),
+            )
+        })
+}
+
 #[derive(Debug, Error)]
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
@@ -720,6 +756,45 @@ impl<'a> Engine<'a> {
                     })?;
                 Ok(ScalarValue::Date(base + chrono::Duration::days(offset)))
             }
+            ScalarExpr::DateAddMonths { date, months } => {
+                let base = self
+                    .eval_scalar_expr(date, entity_id, period)?
+                    .as_date()
+                    .ok_or_else(|| {
+                        EvalError::TypeMismatch(
+                            "date_add_months expects a date on the left".to_string(),
+                        )
+                    })?;
+                let offset = self
+                    .eval_scalar_expr(months, entity_id, period)?
+                    .as_index()
+                    .ok_or_else(|| {
+                        EvalError::TypeMismatch(
+                            "date_add_months expects an integer month count on the right"
+                                .to_string(),
+                        )
+                    })?;
+                Ok(ScalarValue::Date(shift_calendar_months(base, offset)?))
+            }
+            ScalarExpr::DateAddYears { date, years } => {
+                let base = self
+                    .eval_scalar_expr(date, entity_id, period)?
+                    .as_date()
+                    .ok_or_else(|| {
+                        EvalError::TypeMismatch(
+                            "date_add_years expects a date on the left".to_string(),
+                        )
+                    })?;
+                let offset = self
+                    .eval_scalar_expr(years, entity_id, period)?
+                    .as_index()
+                    .ok_or_else(|| {
+                        EvalError::TypeMismatch(
+                            "date_add_years expects an integer year count on the right".to_string(),
+                        )
+                    })?;
+                Ok(ScalarValue::Date(shift_calendar_years(base, offset)?))
+            }
             ScalarExpr::DaysBetween { from, to } => {
                 let a = self
                     .eval_scalar_expr(from, entity_id, period)?
@@ -1264,6 +1339,14 @@ fn collect_scalar_trace_references(
         ScalarExpr::DateAddDays { date, days } => {
             collect_scalar_trace_references(date, derived, parameters);
             collect_scalar_trace_references(days, derived, parameters);
+        }
+        ScalarExpr::DateAddMonths { date, months } => {
+            collect_scalar_trace_references(date, derived, parameters);
+            collect_scalar_trace_references(months, derived, parameters);
+        }
+        ScalarExpr::DateAddYears { date, years } => {
+            collect_scalar_trace_references(date, derived, parameters);
+            collect_scalar_trace_references(years, derived, parameters);
         }
         ScalarExpr::DaysBetween { from, to } => {
             collect_scalar_trace_references(from, derived, parameters);
